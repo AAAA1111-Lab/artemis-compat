@@ -1522,6 +1522,17 @@ void LuaEngine::DispatchClick(float x, float y) {
     //   * otherwise the button only moves the cursor (btn_clickex syncs) and
     //     the action is driven by the CLICK key, which the framework routes
     //     through setonpush_calllua (dialog yes/no, UI key nav, ...).
+    // Both names are accepted by StoreLyevent. Keep each dispatch path's
+    // existing priority, but fall back to the other spelling exactly once.
+    const auto call_click = [&](const char *primary, const char *fallback,
+                                const std::vector<std::pair<std::string, std::string>> &params,
+                                bool quiet) {
+        for (const char *name : {primary, fallback})
+            for (const auto &kv : attrs)
+                if (kv.first == name && !kv.second.empty())
+                    return CallEvent(kv.second, params, quiet);
+        return false;
+    };
     std::string exec;
     DoString("local b=btn and btn.cursor; local g=btn and btn.name;"
              "local i=b and g and btn[g] and btn[g].p[b];"
@@ -1547,9 +1558,7 @@ void LuaEngine::DispatchClick(float x, float y) {
         for (const auto &kv : attrs)
             if (kv.first == "key")
                 click_attrs.emplace_back("btn", kv.second);
-        for (const auto &kv : attrs)
-            if (kv.first == "click" && !kv.second.empty())
-                CallEvent(kv.second, click_attrs, false);
+        call_click("click", "function", click_attrs, false);
     } else {
         // A handler carrying a non-empty `lua` attr is self-contained (e.g.
         // setonpush_call reads param.lua and e:tag{calllua} itself) — firing
@@ -1560,9 +1569,7 @@ void LuaEngine::DispatchClick(float x, float y) {
             if (kv.first == "lua" && !kv.second.empty()) self_contained = true;
         Log(kLogInfo, "click: button " + std::string(self_contained ? "handler" : "cursor-sync") +
                       " path id='" + id + "'" + (self_contained ? "" : " -> onpush key 1"));
-        for (const auto &kv : attrs)     // cursor-sync (function = btn_clickex)
-            if (kv.first == "function" && !kv.second.empty())
-                CallEvent(kv.second, attrs, true);
+        call_click("function", "click", attrs, true);
         if (!self_contained) FireOnPush(1);  // CLICK key → setonpush_calllua
     }
     if (script_runner_) script_runner_->EndEvent(event);

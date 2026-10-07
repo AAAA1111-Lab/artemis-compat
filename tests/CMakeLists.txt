@@ -29,6 +29,10 @@ add_executable(system_voice_regressions system_voice_regressions.cpp)
 target_link_libraries(system_voice_regressions PRIVATE artemis_core)
 add_test(NAME system_voice_regressions COMMAND system_voice_regressions)
 
+add_executable(menu_callback_regressions menu_callback_regressions.cpp)
+target_link_libraries(menu_callback_regressions PRIVATE artemis_core)
+add_test(NAME menu_callback_regressions COMMAND menu_callback_regressions)
+
 add_executable(runtime_regressions runtime_regressions.cpp)
 target_link_libraries(runtime_regressions PRIVATE artemis_core)
 add_test(NAME runtime_regressions COMMAND runtime_regressions)
