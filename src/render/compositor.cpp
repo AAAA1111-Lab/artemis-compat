@@ -702,8 +702,17 @@ bool Compositor::Update(double now_ms) {
 }
 
 double Compositor::PendingAnimationMs(double now_ms) const {
+    return PendingAnimationMsImpl(now_ms, false);
+}
+
+double Compositor::PendingBlockingAnimationMs(double now_ms) const {
+    return PendingAnimationMsImpl(now_ms, true);
+}
+
+double Compositor::PendingAnimationMsImpl(double now_ms, bool blocking_only) const {
     double remain = 0;
     for (const Tween &tw : tweens_) {
+        if (blocking_only && tw.repeat < 0) continue;
         const double end = tw.start_ms + tw.Duration();
         if (end - now_ms > remain) remain = end - now_ms;
     }
