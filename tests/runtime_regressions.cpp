@@ -465,6 +465,27 @@ int main(int argc, char** argv) {
         Check(!barriers.IsWaiting(), "script resumes once only infinite loops remain");
     }
 
+    // A negative repeat flag is not itself an infinite duration: zero-time
+    // work executes once after its delay, and that finite delay must block.
+    {
+        artc::Compositor delayed;
+        delayed.Init(1280, 720);
+        delayed.AddTween("delayed", {{"left","0,100"},{"time","0"},
+                                   {"delay","50"},{"yoyo","-1"}}, 1050);
+        Check(delayed.PendingAnimationMs(1050)==50 &&
+              delayed.PendingBlockingAnimationMs(1050)==50,
+              "zero-duration negative-repeat segment retains its finite delay");
+        Check(delayed.PendingBlockingAnimationMs(1075)==25,
+              "finite delayed work retains the remaining deadline");
+        Check(!delayed.Update(1075), "delayed zero-time work has not started early");
+        Check(delayed.Update(1100), "delayed zero-time work executes at its deadline");
+        Check(delayed.PendingAnimationMs(1100)==0 &&
+              delayed.PendingBlockingAnimationMs(1100)==0,
+              "zero-time negative-repeat segment finishes rather than looping");
+        const auto final=delayed.GetLayerInfo("delayed");
+        Check(final.found && final.left==100,
+              "finite delayed segment applies its final property once");
+    }
     artc::AutoReadTimer reading;
     Check(!reading.Ready(0, 100, true), "voice/text blocks the auto timer");
     Check(!reading.Ready(500, 100, false), "reading interval starts after voice/text");

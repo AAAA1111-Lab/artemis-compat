@@ -712,8 +712,11 @@ double Compositor::PendingBlockingAnimationMs(double now_ms) const {
 double Compositor::PendingAnimationMsImpl(double now_ms, bool blocking_only) const {
     double remain = 0;
     for (const Tween &tw : tweens_) {
-        if (blocking_only && tw.repeat < 0) continue;
-        const double end = tw.start_ms + tw.Duration();
+        const double duration = tw.Duration();
+        // A zero-time segment still has a finite delay even with loop=-1.
+        // Skip actual endless motion, not every negative repeat declaration.
+        if (blocking_only && std::isinf(duration)) continue;
+        const double end = tw.start_ms + duration;
         if (end - now_ms > remain) remain = end - now_ms;
     }
     if (trans_active_) {
