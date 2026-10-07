@@ -275,7 +275,7 @@ int main() {
             if (body && body->glyphs.size()==4) {
                 Check(std::abs(body->glyphs[1].x-body->glyphs[0].x-16)<0.01f &&
                       std::abs(body->glyphs[3].x-body->glyphs[0].x)<0.01f &&
-                      std::abs(body->glyphs[3].y-body->glyphs[0].y-20)<0.01f,
+                      std::abs(body->glyphs[3].y-body->glyphs[0].y-30)<0.01f,
                       "tracking is applied after scaling and wraps only the fourth glyph");
             } else Check(false, "tracking text retains four positioned glyphs");
             Check(c.SetText("height.ruby","A",30,0xffffff,100,
@@ -300,6 +300,30 @@ int main() {
                   std::abs(spaced->glyphs[0].w-14)<=1 &&
                   std::abs(spaced->glyphs[0].h-16)<=1,
                   "outline and shadow take layout width without changing fill size");
+            // This sample-style negative spacing exposes a shortened OS/2
+            // line box even though its CELL-sized ink is already correct.
+            const std::map<std::string, std::string> line_style = {
+                {"outline","1"},{"shadow","1"},{"kerning","-3"},
+                {"spacetop","0"},{"rubysize","14"},
+                {"spacemiddle","-12"},{"spacebottom","-10"}};
+            Check(c.SetText("lineheight.explicit","A\nA",30,0xffffff,100,line_style),
+                  "layout explicit newline with tall metrics and negative row spacing");
+            const auto* lines=Find(c,"lineheight.explicit");
+            Check(lines && lines->glyphs.size()==2 &&
+                  std::abs(lines->glyphs[1].y-lines->glyphs[0].y-25)<0.01f &&
+                  lines->glyphs[0].y+lines->glyphs[0].h<=lines->glyphs[1].y &&
+                  std::abs(lines->glyphs[0].y-4)<0.01f &&
+                  std::abs(lines->glyphs[0].w-14)<=1 &&
+                  std::abs(lines->glyphs[0].h-16)<=1,
+                  "requested cell height prevents line overlap while retaining first-line ink");
+            Check(c.SetText("lineheight.wrap","AAAA",30,0xffffff,55,line_style),
+                  "wrap outlined text with tall metrics and negative row spacing");
+            const auto* wrapped=Find(c,"lineheight.wrap");
+            Check(wrapped && wrapped->glyphs.size()==4 &&
+                  std::abs(wrapped->glyphs[1].x-wrapped->glyphs[0].x-14)<0.01f &&
+                  std::abs(wrapped->glyphs[3].y-wrapped->glyphs[0].y-25)<0.01f &&
+                  wrapped->glyphs[0].y+wrapped->glyphs[0].h<=wrapped->glyphs[3].y,
+                  "automatic wrapping uses the same non-overlapping row height");
             Check(c.SetText("spacing.ruby","AA",30,0xffffff,100,
                   {{"rubysize","15"},{"outline","1"},{"shadow","1"},
                    {"kerning","-3"},{"rubykerning","2"}},{{0,2,"AA"}}),

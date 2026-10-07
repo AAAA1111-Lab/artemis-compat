@@ -1216,13 +1216,16 @@ bool Compositor::SetText(const std::string &id, const std::string &text,
     // captions below their scripted top and inflates every line's spacing.
     stbtt_GetFontVMetricsOS2(info, &ascent, &descent, &linegap);
     const float sascent = ascent * scale;
-    const float sdescent = descent * scale;
     // spacemiddle separates the reserved ruby row from the main glyph row.
     // It is often negative; omitting rubysize makes adjacent lines overlap.
     const float ruby_row = std::max(0.0, number("rubysize", ruby.empty() ? 0 : size/2));
     const float row_top = number("spacetop", 0) + ruby_row + number("spacemiddle", 0);
     const int baseline = static_cast<int>(std::ceil(sascent + row_top)) + outline;
-    const float advance_h = sascent - sdescent + linegap * scale +
+    // A character's layout cell retains the requested height even when
+    // OS/2 typographic metrics are shorter than the CELL sizing metrics.
+    // Effect padding is part of that cell, as it is for horizontal advance.
+    // Keep the verified raster scale and first-line baseline unchanged.
+    const float advance_h = size + 2 * outline + shadow +
         row_top + number("spacebottom", 0);
 
     // UTF-8 → codepoints → glyphs, then two-pass word layout:
