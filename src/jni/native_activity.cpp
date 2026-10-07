@@ -41,6 +41,7 @@
 #include "render/renderer.h"
 #include "render/compositor.h"
 #include "jni/host_lifecycle.h"
+#include "jni/android_input_policy.h"
 
 #define TAG "Artemis"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -266,6 +267,7 @@ int OnInputEvent(int, int, void *data) {
     AInputEvent *ev = nullptr;
     while (AInputQueue_getEvent(q, &ev) >= 0) {
         if (AInputQueue_preDispatchEvent(q, ev) != 0) continue;
+        bool handled = false;
         const int32_t type = AInputEvent_getType(ev);
         if (type == AINPUT_EVENT_TYPE_MOTION) {
             const int32_t action = AMotionEvent_getAction(ev) & AMOTION_EVENT_ACTION_MASK;
@@ -274,24 +276,31 @@ int OnInputEvent(int, int, void *data) {
             if (action == AMOTION_EVENT_ACTION_DOWN ||
                 action == AMOTION_EVENT_ACTION_POINTER_DOWN) {
                 EnqueueInput({false, false, 1, true, x, y});
+                handled = true;
             } else if (action == AMOTION_EVENT_ACTION_MOVE) {
                 // drag continuation — no key edge, updates the pointer only
                 EnqueueInput({false, false, 1, true, x, y});
                 g_state.input_queue_events.back().is_move = true;
                 g_state.input_queue_events.back().down = false;
+                handled = true;
             } else if (action == AMOTION_EVENT_ACTION_UP ||
                        action == AMOTION_EVENT_ACTION_POINTER_UP ||
                        action == AMOTION_EVENT_ACTION_CANCEL) {
                 EnqueueInput({false, false, 1, false, x, y});
+                handled = true;
             }
         } else if (type == AINPUT_EVENT_TYPE_KEY) {
-            const int id = KeyEventToId(AKeyEvent_getKeyCode(ev));
+            const int32_t key_code = AKeyEvent_getKeyCode(ev);
+            const int id = KeyEventToId(key_code);
             const int32_t action = AKeyEvent_getAction(ev);
-            if (id > 0) {
+            if (ShouldDispatchPhysicalAndroidKey(key_code, action, id)) {
                 EnqueueInput({true, false, id, action == AKEY_EVENT_ACTION_DOWN, 0, 0});
+                handled = true;
             }
         }
-        AInputQueue_finishEvent(q, ev, 1);
+        // Unconsumed events return to Android's default dispatch, including
+        // media-volume adjustment. Script-emulated key ids remain unchanged.
+        AInputQueue_finishEvent(q, ev, handled ? 1 : 0);
     }
     return 1;
 }
