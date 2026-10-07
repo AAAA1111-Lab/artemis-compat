@@ -34,6 +34,38 @@ void Size(const artc::Compositor& c, const char* id, float expected, const char*
           std::abs(layer->glyphs[0].w-std::ceil(expected*0.6f))<=1 &&
           std::abs(layer->glyphs[0].h-std::ceil(expected*0.7f))<=1, why);
 }
+// rectangle.ttf has equal em and hhea heights. Derive an independent
+// runtime-only stb fixture to distinguish the two sizes without changing
+// the original outlines, OS/2 baseline, or shared regression asset.
+std::vector<uint8_t> TallMetricsFont(const std::vector<uint8_t>& original) {
+    auto bytes = original;
+    const auto u16 = [&](size_t at) -> uint16_t {
+        return (uint16_t(bytes.at(at)) << 8) | bytes.at(at+1);
+    };
+    const auto u32 = [&](size_t at) -> uint32_t {
+        return (uint32_t(u16(at)) << 16) | u16(at+2);
+    };
+    const auto put16 = [&](size_t at, int value) {
+        bytes.at(at) = (uint16_t(value) >> 8) & 255;
+        bytes.at(at+1) = uint16_t(value) & 255;
+    };
+    if (bytes.size() < 12) return {};
+    const size_t count = u16(4);
+    if (count > (bytes.size()-12)/16) return {};
+    for (size_t i=0; i<count; ++i) {
+        const size_t record=12+i*16;
+        if (u32(record) != 0x68686561) continue; // hhea
+        const size_t offset=u32(record+8), length=u32(record+12);
+        if (length < 36 || offset > bytes.size() || length > bytes.size()-offset)
+            return {};
+        put16(offset+4, 1200);
+        put16(offset+6, -300);
+        // stb does not consume sfnt table checksums in this in-memory fixture.
+        // Its em stays 1000, and no font is redistributed or written separately.
+        return bytes;
+    }
+    return {};
+}
 int InkHeight(artc::Compositor& c, int width, int height) {
     glViewport(0,0,width,height);
     c.Draw();
@@ -188,6 +220,68 @@ int main() {
               "parent and surface scaling compose once each in actual pixels");
         Size(c,"1.body",40,"surface and parent changes do not enlarge glyph raster dimensions");
         c.Shutdown();
+    }
+    {
+        const auto tall_font=TallMetricsFont(font_data);
+        Check(!tall_font.empty(), "derive independent font with hhea height 1500 and em 1000");
+        if (!tall_font.empty()) {
+            std::vector<uint8_t> tall_pack={'p','f','8'};
+            Put32(tall_pack,index_size); Put32(tall_pack,1); Put32(tall_pack,name.size());
+            tall_pack.insert(tall_pack.end(),name.begin(),name.end());
+            Put32(tall_pack,0); Put32(tall_pack,7+index_size); Put32(tall_pack,tall_font.size());
+            tall_pack.insert(tall_pack.end(),tall_font.begin(),tall_font.end());
+            const auto tall_path=std::filesystem::path(path.string()+".height.pfs");
+            { std::ofstream out(tall_path,std::ios::binary);
+              out.write(reinterpret_cast<const char*>(tall_pack.data()),tall_pack.size()); }
+            artc::PackManager tall_packs;
+            Check(tall_packs.OpenChain(tall_path.string(),{0}), "open tall-metrics font pack");
+            artc::Compositor c; c.Init(256,192); c.SetPackManager(&tall_packs);
+            Check(c.LoadFont(name), "load tall-metrics font through compositor");
+            artc::LuaEngine script;
+            Check(script.Init(&tall_packs,artc::Ini{},"android",256,192,&c),
+                  "initialize tall-metrics font script");
+            Check(script.DoString(R"(
+                e:tag{'chgmsg',id='height.body'}
+                e:tag{'font',size=30,width=60,kerning=0}
+                e:tag{'print',data='AAAA'}
+            )", "pixel-height body"), "execute tall-metrics font and print tags");
+            const auto* body=Find(c,"height.body");
+            // 600x700 ink at scale 30/1500, advance 700*30/1500 = 14.
+            Check(body && body->glyphs.size()==4 &&
+                  std::abs(body->glyphs[0].w-12)<=1 &&
+                  std::abs(body->glyphs[0].h-14)<=1,
+                  "body size uses vertical pixel height instead of em height");
+            if (body && body->glyphs.size()==4) {
+                Check(std::abs(body->glyphs[1].x-body->glyphs[0].x-14)<0.01f &&
+                      std::abs(body->glyphs[3].y-body->glyphs[0].y)<0.01f,
+                      "advance uses the same height scale and four glyphs fit width 60");
+                // OS/2 ascender 800 and ink top 700 yield (800-700)*.02=2.
+                Check(std::abs(body->glyphs[0].y-2)<0.01f,
+                      "existing OS/2 baseline remains independent of the sizing metric");
+            }
+            Check(script.DoString(R"(
+                e:tag{'font',kerning=2}; e:tag{'rp'}; e:tag{'print',data='AAAA'}
+            )", "height-scale tracking"), "execute tracking and wrap tags");
+            body=Find(c,"height.body");
+            if (body && body->glyphs.size()==4) {
+                Check(std::abs(body->glyphs[1].x-body->glyphs[0].x-16)<0.01f &&
+                      std::abs(body->glyphs[3].x-body->glyphs[0].x)<0.01f &&
+                      std::abs(body->glyphs[3].y-body->glyphs[0].y-20)<0.01f,
+                      "tracking is applied after scaling and wraps only the fourth glyph");
+            } else Check(false, "tracking text retains four positioned glyphs");
+            Check(c.SetText("height.ruby","A",30,0xffffff,100,
+                            {{"rubysize","15"}}, {{0,1,"A"}}),
+                  "rasterize ruby with explicit pixel height");
+            const auto* ruby=Find(c,"height.ruby");
+            Check(ruby && ruby->glyphs.size()==2 &&
+                  std::abs(ruby->glyphs[0].w-12)<=1 &&
+                  std::abs(ruby->glyphs[0].h-14)<=1 &&
+                  std::abs(ruby->glyphs[1].w-6)<=1 &&
+                  std::abs(ruby->glyphs[1].h-7)<=1,
+                  "ruby and body share vertical pixel-height sizing");
+            c.Shutdown();
+            std::filesystem::remove(tall_path);
+        }
     }
     std::filesystem::remove(path);
     eglMakeCurrent(display,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT);
