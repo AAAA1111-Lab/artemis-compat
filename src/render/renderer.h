@@ -21,12 +21,14 @@ class Renderer {
 public:
     // Create EGL/GLES context bound to the native window.
     bool Init(void *native_window);
+    bool RefreshSize();
+    bool HasCurrentContext() const;
     // Called when the window geometry changes.
     void Resize(int width, int height);
     // Clear the backbuffer (stage background).
     void Clear();
     // Swap the backbuffer to the display.
-    void Present();
+    bool Present();
     // True when eglSwapBuffers paces the frame loop to the display refresh
     // (eglSwapInterval(1)); false when the host must pace itself (fallback
     // build/device: ARTC_SWAP_INTERVAL=0).
@@ -53,6 +55,7 @@ private:
     void *window_ = nullptr;
 #endif
     bool ready_ = false;
+    bool context_lost_ = false;
     bool swap_paced_ = false;   // eglSwapInterval(1) applied successfully
     int width_ = 0, height_ = 0;
     float vp_x_ = 0, vp_y_ = 0, vp_w_ = 1, vp_h_ = 1;   // viewport in surface px

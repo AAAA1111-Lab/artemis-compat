@@ -94,6 +94,16 @@ float Renderer::StageY(float win_y) const {
     return (win_y - vp_y_) / vp_h_ * stage_h_;
 }
 
+bool Renderer::RefreshSize() {
+    if (!ready_) return false;
+    EGLint width = 0, height = 0;
+    if (!eglQuerySurface(display_, surface_, EGL_WIDTH, &width) ||
+        !eglQuerySurface(display_, surface_, EGL_HEIGHT, &height) || width < 1 || height < 1 ||
+        (width == width_ && height == height_)) return false;
+    Resize(width, height);
+    return true;
+}
+
 void Renderer::Resize(int width, int height) {
     width_ = width;
     height_ = height;
@@ -107,15 +117,23 @@ void Renderer::Clear() {
     glClear(GL_COLOR_BUFFER_BIT);
 }
 
-void Renderer::Present() {
-    if (!ready_) return;
-    if (!eglSwapBuffers(display_, surface_))
-        Log(kLogError, "eglSwapBuffers failed");
+bool Renderer::Present() {
+    if (!ready_) return false;
+    if (eglSwapBuffers(display_, surface_)) return true;
+    const EGLint error = eglGetError();
+    context_lost_ = error == EGL_CONTEXT_LOST;
+    ready_ = false; // Rebuild even when Android retains the same native window.
+    Log(kLogError, "eglSwapBuffers failed: " + std::to_string(error));
+    return false;
 }
 
 void Renderer::DrawFrame() {
     Clear();
     Present();
+}
+
+bool Renderer::HasCurrentContext() const {
+    return !context_lost_ && context_ != EGL_NO_CONTEXT && eglGetCurrentContext() == context_;
 }
 
 void Renderer::Shutdown() {
@@ -129,6 +147,7 @@ void Renderer::Shutdown() {
     context_ = EGL_NO_CONTEXT;
     display_ = EGL_NO_DISPLAY;
     ready_ = false;
+    context_lost_ = false;
 }
 
 #else // host build: no GL
@@ -139,7 +158,9 @@ void Renderer::SetStage(int, int, bool) {}
 float Renderer::StageX(float x) const { return x; }
 float Renderer::StageY(float y) const { return y; }
 void Renderer::Clear() {}
-void Renderer::Present() {}
+bool Renderer::Present() { return false; }
+bool Renderer::RefreshSize() { return false; }
+bool Renderer::HasCurrentContext() const { return false; }
 void Renderer::DrawFrame() {}
 void Renderer::Shutdown() {}
 
