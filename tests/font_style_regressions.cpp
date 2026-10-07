@@ -288,6 +288,27 @@ int main() {
                   std::abs(ruby->glyphs[1].w-6)<=1 &&
                   std::abs(ruby->glyphs[1].h-7)<=1,
                   "ruby and body share vertical pixel-height sizing");
+            // At the same CELL raster size, effect-cell padding compensates
+            // the sample's negative tracking instead of shrinking the ink.
+            Check(c.SetText("spacing.body","AAAA",30,0xffffff,55,
+                  {{"outline","1"},{"shadow","1"},{"kerning","-3"}}),
+                  "layout effect cell with negative body tracking");
+            const auto* spaced=Find(c,"spacing.body");
+            Check(spaced && spaced->glyphs.size()==4 &&
+                  std::abs(spaced->glyphs[1].x-spaced->glyphs[0].x-14)<0.01f &&
+                  spaced->glyphs[3].y>spaced->glyphs[0].y &&
+                  std::abs(spaced->glyphs[0].w-14)<=1 &&
+                  std::abs(spaced->glyphs[0].h-16)<=1,
+                  "outline and shadow take layout width without changing fill size");
+            Check(c.SetText("spacing.ruby","AA",30,0xffffff,100,
+                  {{"rubysize","15"},{"outline","1"},{"shadow","1"},
+                   {"kerning","-3"},{"rubykerning","2"}},{{0,2,"AA"}}),
+                  "layout ruby with independent tracking");
+            const auto* reading=Find(c,"spacing.ruby");
+            Check(reading && reading->glyphs.size()==4 &&
+                  std::abs(reading->glyphs[1].x-reading->glyphs[0].x-14)<0.01f &&
+                  std::abs(reading->glyphs[3].x-reading->glyphs[2].x-12)<0.01f,
+                  "ruby uses its own tracking plus the effect cell width");
             c.Shutdown();
             std::filesystem::remove(tall_path);
         }

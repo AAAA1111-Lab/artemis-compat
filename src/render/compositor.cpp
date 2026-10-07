@@ -1192,6 +1192,18 @@ bool Compositor::SetText(const std::string &id, const std::string &text,
     if (!std::isfinite(scale) || scale <= 0) return false;
     const int outline = std::clamp(static_cast<int>(number("outline", 0)), 0, 8);
     const float tracking = number("kerning", 0);
+    const float ruby_tracking = number("rubykerning", 0);
+    const int shadow = std::clamp(static_cast<int>(number("shadow", 0)), 0, 256);
+    // Layout uses the character surface width, including effect padding.
+    // Keep the verified pixel-height raster scale; tracking is in stage pixels.
+    const auto character_advance = [&](int glyph, float glyph_scale, float spacing) {
+        int advance = 0, bearing = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        stbtt_GetGlyphHMetrics(info, glyph, &advance, &bearing);
+        stbtt_GetGlyphBitmapBox(info, glyph, glyph_scale, glyph_scale, &x0, &y0, &x1, &y1);
+        const int natural = std::max(static_cast<int>(std::lround(advance * glyph_scale)),
+                                     std::max(0, x0) + x1 - x0);
+        return static_cast<int>(std::lround(natural + 2 * outline + shadow + spacing));
+    };
     const auto alignment = style.find("align");
     const std::string align = alignment == style.end() ? "left" : alignment->second;
     const auto stroke = style.find("outlinecolor");
@@ -1236,10 +1248,8 @@ bool Compositor::SetText(const std::string &id, const std::string &text,
     glyphs.reserve(cps.size()); advances.reserve(cps.size());
     for (uint32_t cp : cps) {
         const int gi = stbtt_FindGlyphIndex(info, static_cast<int>(cp));
-        int adv = 0, lsb = 0;
-        stbtt_GetGlyphHMetrics(info, gi, &adv, &lsb);
         glyphs.push_back(gi);
-        advances.push_back(static_cast<int>(std::lround(adv * scale + tracking)));
+        advances.push_back(character_advance(gi, scale, tracking));
     }
     if (glyphs.empty()) return false;
     struct RubyGroup { size_t first, last, glyph_first, glyph_last; int base_width, width; };
@@ -1258,10 +1268,9 @@ bool Compositor::SetText(const std::string &id, const std::string &text,
         for(size_t k=first;k<last;++k) base_width+=advances[k];
         const size_t glyph_first=glyphs.size();
         for(uint32_t cp:decode(r.text)) {
-            int gi=stbtt_FindGlyphIndex(info,static_cast<int>(cp)),adv=0,lsb=0;
-            stbtt_GetGlyphHMetrics(info,gi,&adv,&lsb);
+            int gi=stbtt_FindGlyphIndex(info,static_cast<int>(cp));
             cps.push_back(cp); glyphs.push_back(gi);
-            advances.push_back(static_cast<int>(std::lround(adv*ruby_scale)));
+            advances.push_back(character_advance(gi, ruby_scale, ruby_tracking));
             ruby_width+=advances.back();
         }
         const int width=std::max(base_width,ruby_width);
