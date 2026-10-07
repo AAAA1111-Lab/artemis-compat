@@ -37,7 +37,9 @@ void Size(const artc::Compositor& c, const char* id, float expected, const char*
 // rectangle.ttf has equal em and hhea heights. Derive an independent
 // runtime-only stb fixture to distinguish the two sizes without changing
 // the original outlines, OS/2 baseline, or shared regression asset.
-std::vector<uint8_t> TallMetricsFont(const std::vector<uint8_t>& original) {
+std::vector<uint8_t> TallMetricsFont(const std::vector<uint8_t>& original,
+                                     int ascent = 1200, int descent = -300,
+                                     bool invalid_os2 = false) {
     auto bytes = original;
     const auto u16 = [&](size_t at) -> uint16_t {
         return (uint16_t(bytes.at(at)) << 8) | bytes.at(at+1);
@@ -52,19 +54,26 @@ std::vector<uint8_t> TallMetricsFont(const std::vector<uint8_t>& original) {
     if (bytes.size() < 12) return {};
     const size_t count = u16(4);
     if (count > (bytes.size()-12)/16) return {};
+    bool hhea_found = false, os2_found = false;
     for (size_t i=0; i<count; ++i) {
         const size_t record=12+i*16;
-        if (u32(record) != 0x68686561) continue; // hhea
+        const uint32_t tag=u32(record);
+        if (tag != 0x68686561 && tag != 0x4f532f32) continue; // hhea, OS/2
         const size_t offset=u32(record+8), length=u32(record+12);
-        if (length < 36 || offset > bytes.size() || length > bytes.size()-offset)
+        const size_t minimum=tag==0x68686561 ? 36 : 72;
+        if (length < minimum || offset > bytes.size() || length > bytes.size()-offset)
             return {};
-        put16(offset+4, 1200);
-        put16(offset+6, -300);
-        // stb does not consume sfnt table checksums in this in-memory fixture.
-        // Its em stays 1000, and no font is redistributed or written separately.
-        return bytes;
+        if (tag == 0x68686561) {
+            put16(offset+4, ascent); put16(offset+6, descent);
+            hhea_found = true;
+        } else {
+            if (invalid_os2) { put16(offset+68, 0); put16(offset+70, 0); }
+            os2_found = true;
+        }
     }
-    return {};
+    // stb does not consume sfnt table checksums in this in-memory fixture.
+    // Its em stays 1000, and no font is redistributed or written separately.
+    return hhea_found && (!invalid_os2 || os2_found) ? bytes : std::vector<uint8_t>{};
 }
 int InkHeight(artc::Compositor& c, int width, int height) {
     glViewport(0,0,width,height);
@@ -282,6 +291,49 @@ int main() {
             c.Shutdown();
             std::filesystem::remove(tall_path);
         }
+    }
+    // Empty/reversed vertical metrics are accepted by stb's InitFont, so
+    // SetText must resolve a safe height before computing raster geometry.
+    for (bool invalid_os2 : {false, true}) {
+        const auto metric_font=TallMetricsFont(font_data, 0, 0, invalid_os2);
+        Check(!metric_font.empty(), "derive zero-hhea font with controlled OS/2 metrics");
+        if (metric_font.empty()) continue;
+        std::vector<uint8_t> metric_pack={'p','f','8'};
+        Put32(metric_pack,index_size); Put32(metric_pack,1); Put32(metric_pack,name.size());
+        metric_pack.insert(metric_pack.end(),name.begin(),name.end());
+        Put32(metric_pack,0); Put32(metric_pack,7+index_size); Put32(metric_pack,metric_font.size());
+        metric_pack.insert(metric_pack.end(),metric_font.begin(),metric_font.end());
+        const auto metric_path=std::filesystem::path(path.string()+
+            (invalid_os2 ? ".invalid-height.pfs" : ".fallback-height.pfs"));
+        { std::ofstream out(metric_path,std::ios::binary);
+          out.write(reinterpret_cast<const char*>(metric_pack.data()),metric_pack.size()); }
+        artc::PackManager metric_packs;
+        Check(metric_packs.OpenChain(metric_path.string(),{0}), "open zero-hhea font pack");
+        artc::Compositor c; c.Init(256,192); c.SetPackManager(&metric_packs);
+        Check(c.LoadFont(name), "load zero-hhea font through compositor");
+        const bool rendered=c.SetText("safe.height","A",30,0xffffff,100,
+                                      {{"rubysize","15"}}, {{0,1,"A"}});
+        if (invalid_os2) {
+            Check(!rendered && !Find(c,"safe.height"),
+                  "font with no positive vertical metric fails before publishing glyphs");
+        } else {
+            const auto* layer=Find(c,"safe.height");
+            Check(rendered && layer && layer->glyphs.size()==2,
+                  "zero hhea falls back to the positive OS/2 height for body and ruby");
+            if (layer && layer->glyphs.size()==2) {
+                Check(std::abs(layer->glyphs[0].w-18)<=1 &&
+                      std::abs(layer->glyphs[0].h-21)<=1 &&
+                      std::abs(layer->glyphs[1].w-9)<=1 &&
+                      std::abs(layer->glyphs[1].h-11)<=1,
+                      "OS/2 1000-unit height scales body 30 and ruby 15 consistently");
+                for (const auto& glyph : layer->glyphs)
+                    Check(std::isfinite(glyph.x) && std::isfinite(glyph.y) &&
+                          std::isfinite(glyph.w) && std::isfinite(glyph.h),
+                          "fallback glyph geometry remains finite");
+            }
+        }
+        c.Shutdown();
+        std::filesystem::remove(metric_path);
     }
     std::filesystem::remove(path);
     eglMakeCurrent(display,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT);

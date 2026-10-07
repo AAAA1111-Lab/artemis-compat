@@ -1175,7 +1175,21 @@ bool Compositor::SetText(const std::string &id, const std::string &text,
     // [font size] requests the ascender-to-descender pixel height, not
     // pixels per em. Tall vertical metrics otherwise enlarge glyphs and
     // change wrapping. Keep the OS/2 baseline and layout below intact.
-    const float scale = stbtt_ScaleForPixelHeight(info, size);
+    // Some fonts leave hhea metrics empty and provide their height in
+    // OS/2. Resolve a positive height before dividing; rejecting an unusable
+    // font is preferable to feeding infinity into glyph layout or the atlas.
+    int height_ascent = 0, height_descent = 0;
+    stbtt_GetFontVMetrics(info, &height_ascent, &height_descent, nullptr);
+    int font_height = height_ascent - height_descent;
+    if (font_height <= 0 &&
+        stbtt_GetFontVMetricsOS2(info, &height_ascent, &height_descent, nullptr))
+        font_height = height_ascent - height_descent;
+    if (font_height <= 0) return false;
+    const auto height_scale = [font_height](float pixels) {
+        return pixels / static_cast<float>(font_height);
+    };
+    const float scale = height_scale(size);
+    if (!std::isfinite(scale) || scale <= 0) return false;
     const int outline = std::clamp(static_cast<int>(number("outline", 0)), 0, 8);
     const float tracking = number("kerning", 0);
     const auto alignment = style.find("align");
@@ -1231,7 +1245,8 @@ bool Compositor::SetText(const std::string &id, const std::string &text,
     struct RubyGroup { size_t first, last, glyph_first, glyph_last; int base_width, width; };
     std::vector<RubyGroup> ruby_groups;
     const float ruby_size=std::clamp(number("rubysize",size/2),1.0,256.0);
-    const float ruby_scale=stbtt_ScaleForPixelHeight(info,ruby_size);
+    const float ruby_scale=height_scale(ruby_size);
+    if (!std::isfinite(ruby_scale) || ruby_scale <= 0) return false;
     for(const auto& r:ruby) {
         if(r.start>text.size() || r.length>text.size()-r.start || r.text.empty()) continue;
         const size_t first=decode(text.substr(0,r.start)).size();
