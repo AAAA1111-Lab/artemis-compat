@@ -88,6 +88,9 @@ public:
     // no control transfer is completed synchronously by EndEvent.
     uint64_t BeginEvent(LuaEngine& lua);
     void EndEvent(uint64_t token);
+    // Complete an event that yielded into queued commands at the same wait
+    // boundary used by the host; a new queued wait still stops the drain.
+    void FinishQueuedEvent(LuaEngine& lua, bool waiting);
     void ShiftWaitDeadlines(LuaEngine& lua, std::chrono::steady_clock::duration pause);
     std::vector<std::string> StackFiles() const;
 
@@ -154,6 +157,8 @@ private:
     uint64_t next_event_ = 0;
     uint64_t event_entry_ = 0;
     uint64_t event_revision_ = 0;
+    uint64_t event_queue_revision_ = 0;
+    bool event_deferred_ = false;
     uint64_t flow_revision_ = 0;
 };
 

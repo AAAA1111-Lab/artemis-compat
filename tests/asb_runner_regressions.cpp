@@ -24,6 +24,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -181,6 +182,8 @@ int main() {
              "*top\n[lua]\nlua_init_count = (lua_init_count or 0) + 1\n"
              "function lua_global_fn() e:tag{\"luaDef\"} end\n[/lua]\n"
              "*entry\n[calllua function=\"lua_global_fn\"]\n[stepLU]\n[return]\n"},
+            {"empty.iet", ""},
+            {"broken.asb", std::string("ASB\0\0\x01\0\0\0",9)},
             {"queue_init.iet",
              "[lua]\nfunction queue_ready() e:tag{\"stepQueueReady\"} end\n[/lua]\n"
              "[stepQueueInit]\n[return]\n"},
@@ -426,6 +429,189 @@ int main() {
         Check(OnlyStepsWithPrefix(trace.steps(), "stepQueue") ==
                   std::vector<std::string>{"stepQueueReady", "stepQueueAfter"},
               "queued loads initialize Lua without executing skipped tag bodies");
+    }
+
+    // ---- 9) queued menu commands retain the interrupted scenario wait ----
+    // Match the Android host's boundary drain: a queued wait cuts the drain
+    // off immediately, while queued call/jump accept omitted-file labels.
+    {
+        artc::LuaEngine lua;
+        Check(lua.Init(&packs, ini, "android", 1280, 720), "lua init (queued event)");
+        artc::AsbRunner runner;
+        runner.SetPackSource(&packs);
+        runner.SetLuaEngine(&lua);
+        lua.SetScriptRunner(&runner);
+        auto drain = [&]() {
+            while (!lua.IsWaiting() && lua.HasQueuedTag()) {
+                std::string name, file, label;
+                std::vector<std::pair<std::string, std::string>> attrs;
+                if (!lua.PopQueuedTag(&name, &attrs)) break;
+                for (const auto& kv : attrs) {
+                    if (kv.first == "file") file = kv.second;
+                    else if (kv.first == "label") label = kv.second;
+                }
+                if (name == "call") runner.Call(file, label);
+                else if (name == "jump") runner.Jump(file, label);
+                else lua.DispatchTag(name, attrs, false);
+            }
+        };
+        auto reset = [&]() {
+            runner.DiscardFlow();
+            lua.SetWaiting(false);
+            std::string name;
+            std::vector<std::pair<std::string, std::string>> attrs;
+            while (lua.PopQueuedTag(&name, &attrs)) {}
+            Check(runner.Jump("emain.iet", "start"), "reset queued-event scenario");
+        };
+        auto finish_menu = [&]() {
+            for (int i=0; i<20 && !lua.IsWaiting() && !runner.Halted(); ++i) {
+                runner.ExecuteLine(lua);
+                drain();
+            }
+        };
+        for (const char* command : {"call", "jump"}) {
+            reset();
+            lua.SetWaiting(true);
+            const size_t pc = runner.CurrentIndex();
+            const auto token = runner.BeginEvent(lua);
+            Check(lua.DoString(std::string("e:enqueueTag{'") + command +
+                  "',file='xsub.iet',label='s'}", "queued menu"), "enqueue menu from Lua callback");
+            runner.EndEvent(token);
+            drain();
+            Check(runner.CurrentFile()=="xsub.iet" && !lua.HasQueuedTag() && !lua.IsWaiting(),
+                  std::string("queued event ") + command + " drains before restoring the story wait");
+            Check(runner.StackFiles().size()==2, "queued transfer keeps one scenario frame");
+            finish_menu();
+            Check(runner.CurrentFile()=="emain.iet" && runner.CurrentIndex()==pc && lua.IsWaiting(),
+                  "queued menu return restores the exact scenario cursor and wait");
+            Check(runner.StackFiles().size()==1, "queued event does not leak a return frame");
+        }
+
+        // Title entry has no scenario wait; it must keep working too.
+        reset();
+        runner.Halt();
+        auto token = runner.BeginEvent(lua);
+        lua.EnqueueTag("call", {{"file","xsub.iet"},{"label","s"}});
+        runner.EndEvent(token);
+        drain(); finish_menu();
+        Check(runner.CurrentFile()=="emain.iet" && runner.Halted() && !lua.IsWaiting(),
+              "queued title menu returns to its halted caller without creating a wait");
+
+        // A callback that adds nothing does not drain older unrelated work.
+        reset();
+        lua.SetWaiting(true);
+        lua.EnqueueTag("call", {{"file","xsub.iet"},{"label","s"}});
+        token = runner.BeginEvent(lua);
+        runner.EndEvent(token);
+        drain();
+        Check(lua.IsWaiting() && lua.HasQueuedTag() && runner.CurrentFile()=="emain.iet",
+              "event without newly queued work preserves the previous wait gate");
+
+        // eqwait must still stop immediately, not run a later call through it.
+        reset();
+        lua.SetWaiting(true);
+        token = runner.BeginEvent(lua);
+        lua.EnqueueTag("wait", {{"time","10000"}});
+        lua.EnqueueTag("call", {{"file","xsub.iet"},{"label","s"}});
+        runner.EndEvent(token);
+        drain();
+        Check(lua.IsWaiting() && lua.QueuedTagName()=="call" && runner.CurrentFile()=="emain.iet",
+              "queued wait stops draining before the following call");
+        lua.SetWaiting(false); // completion of the new wait, not the scenario wait
+        drain(); finish_menu();
+        Check(lua.IsWaiting() && runner.CurrentFile()=="emain.iet" && runner.StackFiles().size()==1,
+              "call after a queued wait still adopts and returns the original scenario wait");
+
+        // A wait-only callback restores the story after its own wait expires.
+        reset();
+        lua.SetWaiting(true);
+        token = runner.BeginEvent(lua);
+        lua.EnqueueTag("wait", {{"time","10000"}});
+        runner.EndEvent(token);
+        drain();
+        Check(lua.IsWaiting() && !lua.HasQueuedTag(), "wait-only queue starts its own wait immediately");
+        lua.SetWaiting(false);
+        Check(lua.IsWaiting(), "wait-only queue completion restores the suspended story wait");
+        token = runner.BeginEvent(lua);
+        Check(token!=0, "finished queued event permits another menu event");
+        runner.EndEvent(token);
+
+        // Preserve the host's bare-label dispatch, including a nested menu.
+        reset();
+        Check(runner.Jump("pmain.iet","start"), "load same-file queued-call fixture");
+        lua.SetWaiting(true);
+        const size_t pc = runner.CurrentIndex();
+        token = runner.BeginEvent(lua);
+        lua.EnqueueTag("call", {{"label","other"}});
+        runner.EndEvent(token);
+        drain();
+        const auto nested = runner.BeginEvent(lua);
+        Check(nested!=0, "queued call hands off the event before nested menu input");
+        lua.EnqueueTag("call", {{"file","xsub.iet"},{"label","s"}});
+        runner.EndEvent(nested);
+        drain(); finish_menu();
+        Check(lua.IsWaiting() && runner.CurrentFile()=="pmain.iet" && runner.CurrentIndex()==pc &&
+              runner.StackFiles().size()==1, "nested queued menus return once to the original wait");
+
+        // Missing or malformed targets and unresolved bare labels must be
+        // no transfer: keep the old script, cursor, stack and wait intact.
+        for (const char* command : {"call", "jump"}) {
+            for (const char* file : {"missing.iet", "empty.iet", "broken.asb", ""}) {
+                reset();
+                lua.SetWaiting(true);
+                const size_t saved_size=runner.Size();
+                const size_t saved_pc=runner.CurrentIndex();
+                token=runner.BeginEvent(lua);
+                lua.EnqueueTag(command, {{"file",file},{"label","missing_label"}});
+                runner.EndEvent(token);drain();
+                Check(lua.IsWaiting() && runner.StackFiles().size()==1 && runner.Size()==saved_size &&
+                      runner.CurrentIndex()==saved_pc && runner.CurrentFile()=="emain.iet",
+                      std::string("failed/no-op queued ")+command+" restores the original flow: "+file);
+            }
+        }
+        reset();
+        lua.SetWaiting(true);
+        token=runner.BeginEvent(lua);
+        lua.EnqueueTag("call", {{"file","missing.iet"}});
+        lua.EnqueueTag("call", {{"file","xsub.iet"},{"label","s"}});
+        runner.EndEvent(token);drain();
+        Check(!lua.IsWaiting() && runner.StackFiles().size()==2 && runner.CurrentFile()=="xsub.iet",
+              "successful call after a failed queued call keeps exactly one caller frame");
+        finish_menu();
+        Check(lua.IsWaiting() && runner.StackFiles().size()==1 && runner.CurrentFile()=="emain.iet",
+              "failed queued call does not steal the wait from the following successful call");
+        reset();
+        lua.SetWaiting(true);
+        Check(!runner.Call("missing.iet",""), "synchronous missing call reports failure");
+        Check(lua.IsWaiting() && runner.StackFiles().size()==1,
+              "synchronous failed call rolls back its caller frame and wait");
+
+        // Pause freezes the timed wait kept behind a not-yet-drained menu.
+        reset();
+        lua.SetTimedWait(200, false);
+        token = runner.BeginEvent(lua);
+        lua.EnqueueTag("call", {{"file","xsub.iet"},{"label","s"}});
+        runner.EndEvent(token);
+        lua.PauseClock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        lua.ResumeClock();
+        drain(); finish_menu();
+        Check(lua.IsWaiting(), "queued menu retains a timed scenario wait across pause/resume");
+        const auto resumed_wait = lua.SuspendWait();
+        Check(resumed_wait.timed && !resumed_wait.accept_input,
+              "queued menu preserves the timed scenario's input permission");
+        lua.RestoreWait(resumed_wait);
+
+        // Save-load/session replacement discards the suspended event too.
+        reset();
+        lua.SetWaiting(true);
+        token = runner.BeginEvent(lua);
+        lua.EnqueueTag("wait", {{"time","10000"}});
+        runner.EndEvent(token); drain();
+        runner.DiscardFlow();
+        lua.SetWaiting(false);
+        Check(!lua.IsWaiting() && !runner.Loaded() && runner.StackFiles().empty(),
+              "DiscardFlow cannot revive a wait from a deferred menu event");
     }
 
     fs::remove_all(dir);

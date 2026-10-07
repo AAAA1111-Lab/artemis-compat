@@ -87,20 +87,24 @@ bool ParseAsb(const std::vector<uint8_t> &data, AsbScript *out) {
 }
 
 bool AsbRunner::Load(const std::vector<uint8_t> &image, const std::string &label) {
-    ++flow_revision_;
+    AsbScript parsed;
     const bool binary = image.size() > 4 && image[0] == 'A' && image[1] == 'S' &&
                         image[2] == 'B' && image[3] == '\0';
-    const bool ok = binary ? ParseAsb(image, &script_)
+    const bool ok = binary ? ParseAsb(image, &parsed)
                            : [&] {
                                  std::string decoded;
                                  DecodeToUtf8(std::string(image.begin(), image.end()),
                                               TextCharset(), decoded);
-                                 return ParseIetScript(PreprocessScript(decoded), &script_);
+                                 return ParseIetScript(PreprocessScript(decoded), &parsed);
                              }();
     if (!ok) {
         Log(kLogError, "asb: image parse failed");
         return false;
     }
+    // Failed targets must leave the interrupted script and its revision
+    // untouched; only a successfully parsed image replaces the cursor.
+    script_ = std::move(parsed);
+    ++flow_revision_;
     loaded_ = true;
     halted_ = false;
     pc_ = 0;
@@ -235,13 +239,17 @@ bool AsbRunner::Call(const std::string &file, const std::string &label) {
     // ends in an empty stack and halts the runner (every later click dead).
     const bool have_caller = !current_file_.empty() && !script_.lines.empty();
     const bool push = have_caller && resume < script_.lines.size();
+    const uint64_t revision = flow_revision_;
+    const size_t depth = callstack_.size();
+    const bool event_wait_was_valid = event_wait_valid_;
+    LuaEngine::WaitState caller_wait{};
     if (push) {
         Frame frame{current_file_, resume, halted_, lua_, {}};
         // The caller's wait travels with the frame and is handed back when
         // the callee returns: an event handler (menu open) suspends the
         // click wait before calling into UI scripts, and the framework's
         // getScriptStack()-driven return count relies on one frame per call.
-        if (lua_) frame.wait = lua_->SuspendWait();
+        if (lua_) frame.wait = caller_wait = lua_->SuspendWait();
         if (event_wait_valid_) {
             if (!WaitActive(frame.wait) && WaitActive(event_wait_))
                 frame.wait = event_wait_;
@@ -249,7 +257,17 @@ bool AsbRunner::Call(const std::string &file, const std::string &label) {
         }
         callstack_.push_back(std::move(frame));
     }
-    return Jump(file, label);
+    const bool result = Jump(file, label);
+    // Jump can fail (missing/malformed image) or accept an unresolved bare
+    // label as a no-op. Neither case may consume the caller's wait or leak
+    // a return frame. A real transfer changes the revision before load-time
+    // Lua runs, so its re-entrant stack changes are never rolled back here.
+    if (push && flow_revision_ == revision && callstack_.size() == depth + 1) {
+        callstack_.pop_back();
+        event_wait_valid_ = event_wait_was_valid;
+        if (lua_) lua_->RestoreWait(caller_wait);
+    }
+    return result;
 }
 
 bool AsbRunner::Return() {
@@ -292,6 +310,8 @@ uint64_t AsbRunner::BeginEvent(LuaEngine& lua) {
     event_halted_ = halted_;
     event_entry_ = ++next_event_;
     event_revision_ = flow_revision_;
+    event_queue_revision_ = lua.QueuedTagRevision();
+    event_deferred_ = false;
     return event_entry_;
 }
 
@@ -300,6 +320,7 @@ void AsbRunner::DiscardFlow() {
     event_entry_=0;
     event_wait_valid_=false;
     event_lua_=nullptr;
+    event_deferred_=false;
     ++flow_revision_;
     loaded_=false;
     halted_=true;
@@ -308,6 +329,16 @@ void AsbRunner::DiscardFlow() {
 void AsbRunner::EndEvent(uint64_t token) {
     if (!token || token != event_entry_) return;
     if (flow_revision_ == event_revision_) {
+        // enqueueTag/eqtag handlers yield their transfer until the host's
+        // next command boundary. Restoring the story wait here would block
+        // that drain permanently. Keep it beside the event until a queued
+        // call adopts it, a jump transfers it, or the queued work finishes.
+        // Older work alone must not bypass a scenario wait.
+        if (event_wait_valid_ && event_lua_ && event_lua_->HasQueuedTag() &&
+            event_lua_->QueuedTagRevision() != event_queue_revision_) {
+            event_deferred_ = true;
+            return;
+        }
         // Handler made no control transfer: hand the suspended wait back.
         if (event_wait_valid_ && event_lua_) event_lua_->RestoreWait(event_wait_);
     } else if (event_wait_valid_ && event_lua_ && !event_halted_) {
@@ -330,6 +361,21 @@ void AsbRunner::EndEvent(uint64_t token) {
     event_wait_valid_ = false;
     event_lua_ = nullptr;
     event_entry_ = 0;
+    event_deferred_ = false;
+}
+
+void AsbRunner::FinishQueuedEvent(LuaEngine& lua, bool waiting) {
+    if (!event_deferred_ || event_lua_ != &lua) return;
+    // A popped final calllua still owns this event while Lua executes.
+    // getScriptWaitReason/IsWaiting inside it is a query, not the host's
+    // completed-command boundary, even though the queue is already empty.
+    if (lua.IsExecutingLua()) return;
+    // Close immediately after a transfer so nested menu input gets its own
+    // event. Otherwise a queued wait owns the active wait until it ends;
+    // only an empty, unblocked queue restores the original scenario wait.
+    if (!event_wait_valid_ || flow_revision_ != event_revision_ ||
+        (!waiting && !lua.HasQueuedTag()))
+        EndEvent(event_entry_);
 }
 
 std::vector<std::string> AsbRunner::StackFiles() const {

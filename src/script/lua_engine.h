@@ -119,6 +119,10 @@ public:
     bool PopQueuedTag(std::string *name,
                       std::vector<std::pair<std::string, std::string>> *attrs);
     bool HasQueuedTag() const { return !tag_queue_.empty(); }
+    // Distinguish work appended by an event from older, wait-gated work.
+    uint64_t QueuedTagRevision() const { return queued_tag_revision_; }
+    // A queued tag may query waits from inside Lua before it transfers flow.
+    bool IsExecutingLua() const;
     // Peek the name of the next queued tag ("" when empty) — lets the host
     // step loop pick up eqwait's pending "wait" at a command boundary.
     std::string QueuedTagName() const {
@@ -508,6 +512,7 @@ private:
     AsbRunner* script_runner_ = nullptr; // host owns the runner
     std::deque<std::pair<std::string,
                          std::vector<std::pair<std::string, std::string>>>> tag_queue_;
+    uint64_t queued_tag_revision_ = 0;
     bool reset_requested_ = false;
     bool exit_requested_ = false;
     bool saving_ = false;
