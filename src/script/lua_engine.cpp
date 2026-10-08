@@ -1694,6 +1694,11 @@ void LuaEngine::EndDrag() {
     drag_id_.clear();
 }
 
+void LuaEngine::CancelDrag() {
+    EndDrag();
+    drag_moved_ = false;
+}
+
 bool LuaEngine::PushGlobalFn(const std::string &fn, bool quiet) {
     size_t start = 0;
     bool first = true;

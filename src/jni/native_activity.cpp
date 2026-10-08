@@ -41,6 +41,7 @@
 #include "render/renderer.h"
 #include "render/compositor.h"
 #include "jni/host_lifecycle.h"
+#include "jni/session_pause.h"
 #include "jni/android_input_policy.h"
 
 #define TAG "Artemis"
@@ -422,7 +423,7 @@ void EngineThreadMain(ANativeActivity *activity) {
     artc::Renderer renderer;
     bool booted = false;
     int applied_audio_pause = -1;
-    int applied_session_pause = -1;
+    artc::SessionPause session_pause;
     bool context_failed = false;
     uint64_t drawn_rev = ~0ull;   // redraw gate: last presented layer revision
 
@@ -482,18 +483,18 @@ void EngineThreadMain(ANativeActivity *activity) {
         }
         const bool session_paused = g_activity_paused.load(std::memory_order_acquire) ||
                                     !renderer.Ready() || context_failed;
+        // Consume a pending [reset] before any resume-time dragout callback.
+        // A paused/lost context keeps the request pending until GL is usable.
+        if (ctx->Started() && session_pause.BeginFrame(ctx->lua(), session_paused)) {
+            LOGI("engine reset requested; re-running boot chain");
+            ctx->compositor().ReleaseGl();
+            booted = false;
+            applied_audio_pause = -1;
+            drawn_rev = ~0ull;
+            ctx->ResetSession();
+        }
         if (ctx->Started()) {
             artc::LuaEngine &lua = ctx->lua();
-            if (static_cast<int>(session_paused) != applied_session_pause) {
-                if (session_paused) {
-                    lua.PauseClock();
-                    // A background release must not turn into a delayed tap.
-                    for (int key = 0; key < 256; ++key) lua.PushKeyUp(key);
-                    lua.SetTouchCount(0);
-                    lua.EndFrame();
-                } else lua.ResumeClock();
-                applied_session_pause = session_paused;
-            }
             const bool audio_paused = session_paused ||
                 g_requested_audio_pause.load(std::memory_order_acquire);
             if (static_cast<int>(audio_paused) != applied_audio_pause) {
@@ -506,18 +507,6 @@ void EngineThreadMain(ANativeActivity *activity) {
             g_state.input_queue_events.clear();
         }
 
-        // [reset] tag = engine reboot (language-select flow ends this way):
-        // drop the Lua session so the boot chain re-runs on the next frame.
-        if (ctx->Started() && renderer.Ready() && !session_paused &&
-            ctx->lua().ConsumeResetRequest()) {
-            LOGI("engine reset requested; re-running boot chain");
-            ctx->compositor().ReleaseGl();
-            booted = false;
-            applied_audio_pause = -1;
-            applied_session_pause = -1;
-            drawn_rev = ~0ull;
-            ctx->ResetSession();
-        }
         // [exit] tag = the framework's go_exit (title exit → dialog YES):
         // terminate the app from the game thread.
         if (ctx->Started() && ctx->lua().ConsumeExitRequest()) {

@@ -234,3 +234,10 @@ if(ARTC_TEST_CGL)
         ARTC_HAS_GLES=1 ARTC_USE_DESKTOP_GL=1 ARTC_TEST_CGL=1)
     target_link_libraries(emote_preview PRIVATE artemis_deps "-framework OpenGL")
 endif()
+
+# Synthetic hit geometry exercises host pause and Lua drag behavior without GL.
+if(_artc_graphics STREQUAL "HEADLESS")
+    add_executable(session_pause_regressions session_pause_regressions.cpp)
+    target_link_libraries(session_pause_regressions PRIVATE artemis::core)
+    add_test(NAME session_pause_regressions COMMAND session_pause_regressions)
+endif()
