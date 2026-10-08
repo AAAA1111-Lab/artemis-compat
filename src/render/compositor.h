@@ -10,6 +10,7 @@
 // the render surface by an orthographic transform in the shader.
 #pragma once
 #include "render/glyph_atlas.h"
+#include "render/presentation.h"
 #include "render/layer_shader.h"
 #include "util/snapshot_image.h"
 #include "util/text.h"
@@ -134,6 +135,11 @@ public:
     // GL draw (called from the render loop on the engine thread). Draws all
     // visible layers, then invokes the present callback ([flip] semantics).
     void Draw();
+    void SetPresentation(const ArtcPresentationCallbacksV1& callbacks, uint64_t generation) {
+        presentation_ = callbacks;
+        presentation_generation_ = generation;
+        ++revision_;
+    }
 
     // One-shot per-layer effective-rect tracing (id, x, y, w, h, z). Shared by
     // the Android draw path and the host `artc drive` frame loop so both can
@@ -341,6 +347,8 @@ private:
     float trans_vague_ = 0;
     uint32_t trans_rule_tex_ = 0;
     uint32_t last_frame_tex_ = 0;   // copy of the last composited frame
+    ArtcPresentationCallbacksV1 presentation_{};
+    uint64_t presentation_generation_ = 0;
     uint32_t scene_fbo_ = 0, scene_tex_ = 0; // retained scene, independent of swap buffers
     bool trans_have_frame_ = false;
     std::vector<Layer> layers_;   // draw order = vector order

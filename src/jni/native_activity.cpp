@@ -40,6 +40,7 @@
 #include "config/ini.h"
 #include "render/renderer.h"
 #include "render/compositor.h"
+#include "render/presentation.h"
 #include "jni/host_lifecycle.h"
 #include "jni/android_input_policy.h"
 
@@ -220,6 +221,17 @@ EngineState g_state;
 std::atomic<bool> g_requested_audio_pause{false};
 // NativeActivity lifecycle is independent of the sound-only JNI pause hook.
 std::atomic<bool> g_activity_paused{true};
+ArtcPresentationCallbacksV1 g_presentation{};
+
+void PresentationEvent(uint32_t event, int version, uint64_t generation, int w = 0, int h = 0) {
+    if (g_presentation.event)
+        g_presentation.event(g_presentation.userdata, event, version, generation, w, h);
+}
+
+struct PresentationThreadScope {
+    ~PresentationThreadScope() { PresentationEvent(ARTC_RENDER_THREAD_STOPPING, 0, 0); }
+};
+
 std::vector<std::string> ListPacks(const char *dir) {
     std::vector<std::string> found;
     if (!dir) return found;
@@ -390,6 +402,7 @@ bool BootScene(artc::EngineContext &ctx, artc::Renderer &renderer) {
 }
 
 void EngineThreadMain(ANativeActivity *activity) {
+    PresentationThreadScope presentation_thread_scope;
     // 1) locate a pack chain in the app data dirs
     std::string pack_path;
     for (const char *base :
@@ -420,6 +433,7 @@ void EngineThreadMain(ANativeActivity *activity) {
     artc::EngineContext::SetCurrent(ctx.get());
 
     artc::Renderer renderer;
+    uint64_t context_generation = 0;
     bool booted = false;
     int applied_audio_pause = -1;
     int applied_session_pause = -1;
@@ -453,17 +467,26 @@ void EngineThreadMain(ANativeActivity *activity) {
             } else {
                 if (current) ANativeWindow_release(current);
                 current = wanted;
+                const int preferred = (g_presentation.flags & ARTC_PRESENTATION_PREFER_ES3) ? 3 : 2;
                 if (current && !context_failed && !renderer.ContextLost()) {
                     bool attached = false;
                     if (renderer.HasRetainedContext()) {
                         attached = renderer.AttachWindow(current);
                     } else if (!ctx->Started()) {
-                        attached = renderer.Init(current);
+                        attached = renderer.Init(current, preferred);
+                        if (attached) {
+                            ++context_generation;
+                            PresentationEvent(ARTC_CONTEXT_CREATED, renderer.GlesVersion(), context_generation,
+                                              renderer.Width(), renderer.Height());
+                            ctx->compositor().SetPresentation(g_presentation, context_generation);
+                        }
                     }
                     if (attached) {
                         renderer.SetStage(ctx->stageW(), ctx->stageH(),
                                           ctx->ini().GetInt("COMMON", "SIDECUT", 0) == 1);
                         drawn_rev = ~0ull;
+                        PresentationEvent(ARTC_SURFACE_RESIZED, renderer.GlesVersion(), context_generation,
+                                          renderer.Width(), renderer.Height());
                     } else LOGE("renderer attach failed: %s", renderer.LastError().c_str());
                 }
                 std::lock_guard<std::mutex> lk(g_state.mutex);
@@ -472,6 +495,7 @@ void EngineThreadMain(ANativeActivity *activity) {
         }
         if (renderer.ContextLost() && !context_failed) {
             context_failed = true;
+            PresentationEvent(ARTC_CONTEXT_LOST, 0, context_generation);
             // CPU reconstruction after genuine context loss is not implemented.
             // Preserve the VM/progress and stop rendering; never silently reboot.
             LOGE("EGL context lost; session retained, rendering suspended");
@@ -479,6 +503,8 @@ void EngineThreadMain(ANativeActivity *activity) {
         if (renderer.Ready() && renderer.RefreshSize()) {
             renderer.SetStage(ctx->stageW(), ctx->stageH(), ctx->ini().GetInt("COMMON", "SIDECUT", 0) == 1);
             drawn_rev = ~0ull;
+            PresentationEvent(ARTC_SURFACE_RESIZED, renderer.GlesVersion(), context_generation,
+                              renderer.Width(), renderer.Height());
         }
         const bool session_paused = g_activity_paused.load(std::memory_order_acquire) ||
                                     !renderer.Ready() || context_failed;
@@ -511,12 +537,17 @@ void EngineThreadMain(ANativeActivity *activity) {
         if (ctx->Started() && renderer.Ready() && !session_paused &&
             ctx->lua().ConsumeResetRequest()) {
             LOGI("engine reset requested; re-running boot chain");
+            PresentationEvent(ARTC_CONTEXT_DESTROYING, renderer.GlesVersion(), context_generation);
             ctx->compositor().ReleaseGl();
             booted = false;
             applied_audio_pause = -1;
             applied_session_pause = -1;
             drawn_rev = ~0ull;
             ctx->ResetSession();
+            ++context_generation;
+            PresentationEvent(ARTC_CONTEXT_CREATED, renderer.GlesVersion(), context_generation,
+                              renderer.Width(), renderer.Height());
+            ctx->compositor().SetPresentation(g_presentation, context_generation);
         }
         // [exit] tag = the framework's go_exit (title exit → dialog YES):
         // terminate the app from the game thread.
@@ -661,7 +692,8 @@ void EngineThreadMain(ANativeActivity *activity) {
             if (drawn_rev != ctx->compositor().Revision() || animating) {
                 renderer.Clear();   // clears the full surface (letterbox bars too)
                 ctx->compositor().Draw();  // layers (script [flip] draws only)
-                renderer.Present(); // single present per frame
+                if (renderer.Present() && g_presentation.presented)
+                    g_presentation.presented(g_presentation.userdata, context_generation);
                 drawn_rev = ctx->compositor().Revision();
                 drew = true;
             }
@@ -677,6 +709,9 @@ void EngineThreadMain(ANativeActivity *activity) {
         }
     }
 
+    // Release host-owned targets before the context (or abandon after loss).
+    PresentationEvent(renderer.HasCurrentContext() ? ARTC_CONTEXT_DESTROYING : ARTC_CONTEXT_LOST,
+                      renderer.GlesVersion(), context_generation);
     // exit: release GL state and window refs
     ctx->Shutdown();
     renderer.Shutdown();
@@ -700,6 +735,14 @@ namespace artc {
 void RequestAudioPause(bool paused) {
     g_requested_audio_pause.store(paused, std::memory_order_release);
 }
+}
+
+extern "C" __attribute__((visibility("default"))) int
+artc_register_presentation_v1(const ArtcPresentationCallbacksV1* callbacks) {
+    if (g_state.running || !callbacks || callbacks->struct_size < sizeof(*callbacks) ||
+        callbacks->abi_version != ARTC_PRESENTATION_ABI_V1) return 0;
+    g_presentation = *callbacks;
+    return 1;
 }
 
 extern "C" JNIEXPORT void JNICALL

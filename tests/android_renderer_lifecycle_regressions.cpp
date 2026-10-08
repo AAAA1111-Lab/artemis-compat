@@ -16,7 +16,7 @@ struct EglMock {
     int created_contexts = 0, destroyed_contexts = 0;
     int created_pbuffers = 0, swap_intervals = 0;
     int selected_surface_bits = 0, viewport_calls = 0;
-    int selected_context_version = 0;
+    int fail_create_version = 0;
     EGLint error = EGL_SUCCESS, next_window_error = EGL_SUCCESS;
     EGLint next_bind_error = EGL_SUCCESS, next_swap_error = EGL_SUCCESS;
     EGLint next_query_error = EGL_SUCCESS;
@@ -40,7 +40,9 @@ EGLBoolean eglChooseConfig(EGLDisplay, const EGLint *attrs, EGLConfig *cfg, EGLi
     *cfg = reinterpret_cast<void *>(2); *num = 1; return EGL_TRUE;
 }
 EGLContext eglCreateContext(EGLDisplay, EGLConfig, EGLContext, const EGLint *attrs) {
-    mock.selected_context_version = Attr(attrs, EGL_CONTEXT_CLIENT_VERSION);
+    if (Attr(attrs, EGL_CONTEXT_CLIENT_VERSION) == mock.fail_create_version) {
+        mock.error = EGL_BAD_MATCH; return EGL_NO_CONTEXT;
+    }
     ++mock.created_contexts; return mock.Id();
 }
 EGLSurface eglCreatePbufferSurface(EGLDisplay, EGLConfig, const EGLint *attrs) {
@@ -104,9 +106,9 @@ int main() {
     ANativeWindow first{1280, 720}, second{2133, 1200};
     {
         Reset(); artc::Renderer r;
-        Require(r.Init(&first), "initial ES2 window must initialize");
+        Require(r.Init(&first, 3), "initial ES3 window must initialize");
         auto context = mock.current;
-        Require(mock.selected_context_version == 2 && r.Ready(), "default ES2 was not retained");
+        Require(r.GlesVersion() == 3 && r.Ready(), "preferred ES3 was not retained");
         Require(mock.selected_surface_bits == (EGL_WINDOW_BIT | EGL_PBUFFER_BIT), "config must support parking and windows");
         Require(r.DetachSurface(), "normal window loss must park the context");
         Require(!r.Ready() && r.HasCurrentContext() && r.HasRetainedContext(), "parking must keep context usable, presentation unavailable");
@@ -124,7 +126,7 @@ int main() {
     {
         Reset(); artc::Renderer r;
         Require(r.Init(&first), "default ES2 window must initialize");
-        Require(mock.selected_context_version == 2, "default host GL version must stay ES2");
+        Require(r.GlesVersion() == 2, "default host GL version must stay ES2");
         auto context = mock.current;
         Require(r.DetachSurface(), "detach before failed attach");
         mock.next_window_error = EGL_BAD_NATIVE_WINDOW;
@@ -134,6 +136,11 @@ int main() {
         mock.next_swap_error = EGL_BAD_NATIVE_WINDOW;
         Require(!r.Present() && !r.Ready() && !r.ContextLost(), "surface swap failure must require reattachment only");
         Require(r.AttachWindow(&first) && mock.current == context, "same-window recovery must preserve context");
+        r.Shutdown();
+    }
+    {
+        Reset(); mock.fail_create_version = 3; artc::Renderer r;
+        Require(r.Init(&first, 3) && r.GlesVersion() == 2, "initial ES3 failure must retain the ES2 fallback");
         r.Shutdown();
     }
     {

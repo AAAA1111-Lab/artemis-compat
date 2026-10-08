@@ -1857,11 +1857,21 @@ void Compositor::Draw() {
     // the last Present). Copying the full stage every Draw was a GPU
     // sync we do not need for idle frames.
     DrawTransitionOverlay();
+    uint32_t presentation_texture = scene_tex_;
+    if (presentation_.filter) {
+        const ArtcPresentationFrameV1 frame = {
+            sizeof(ArtcPresentationFrameV1), scene_tex_, stage_w_, stage_h_,
+            static_cast<uint32_t>(target), viewport[0], viewport[1], viewport[2], viewport[3],
+            revision_, presentation_generation_, 1
+        };
+        const uint32_t filtered = presentation_.filter(presentation_.userdata, &frame);
+        if (filtered) presentation_texture = filtered;
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, target);
     glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
     glUseProgram(prog_.program);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, scene_tex_);
+    glBindTexture(GL_TEXTURE_2D, presentation_texture);
     glUniform1f(prog_.u_top_down,0);
     glUniform1f(prog_.u_alpha, 1);
     const float w = float(stage_w_), h = float(stage_h_);

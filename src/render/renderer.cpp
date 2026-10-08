@@ -35,7 +35,7 @@ void Renderer::ApplySwapInterval() {
     }
 }
 
-bool Renderer::Init(void *native_window) {
+bool Renderer::Init(void *native_window, int preferred_gles_version) {
     Shutdown();
     if (!native_window) { last_error_ = "native window is null"; return false; }
 
@@ -47,10 +47,10 @@ bool Renderer::Init(void *native_window) {
         return false;
     }
 
-    auto create = [&]() {
+    auto create = [&](int version) {
         const EGLint cfg_attrs[] = {
             EGL_SURFACE_TYPE, EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
-            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+            EGL_RENDERABLE_TYPE, version >= 3 ? 0x0040 /* EGL_OPENGL_ES3_BIT */ : EGL_OPENGL_ES2_BIT,
             EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
             EGL_NONE};
         EGLint num = 0;
@@ -58,7 +58,7 @@ bool Renderer::Init(void *native_window) {
             SetEglError("eglChooseConfig");
             return false;
         }
-        const EGLint ctx_attrs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
+        const EGLint ctx_attrs[] = {EGL_CONTEXT_CLIENT_VERSION, version, EGL_NONE};
         context_ = eglCreateContext(display_, config_, EGL_NO_CONTEXT, ctx_attrs);
         if (context_ == EGL_NO_CONTEXT) {
             SetEglError("eglCreateContext");
@@ -67,6 +67,7 @@ bool Renderer::Init(void *native_window) {
         const EGLint parking_attrs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
         parking_surface_ = eglCreatePbufferSurface(display_, config_, parking_attrs);
         if (parking_surface_ != EGL_NO_SURFACE) {
+            gles_version_ = version;
             if (AttachWindow(native_window)) return true;
         } else {
             SetEglError("eglCreatePbufferSurface");
@@ -83,8 +84,9 @@ bool Renderer::Init(void *native_window) {
         context_lost_ = false;
         return false;
     };
-    // A live session never replaces its context to recover a window surface.
-    if (!create()) {
+    // Only initial creation retries ES2; a live session never replaces its
+    // context as a fallback for an unavailable native window.
+    if (!(preferred_gles_version >= 3 && create(3)) && !create(2)) {
         Shutdown();
         return false;
     }
@@ -155,7 +157,7 @@ bool Renderer::AttachWindow(void *native_window) {
     ready_ = true;
     ApplySwapInterval();
     last_error_.clear();
-    Log(kLogInfo, "renderer: GLES2 ready " +
+    Log(kLogInfo, "renderer: GLES" + std::to_string(gles_version_) + " ready " +
                       std::to_string(width_) + "x" + std::to_string(height_));
     return true;
 }
@@ -256,7 +258,7 @@ void Renderer::Shutdown() {
 
 #else // host build: no GL
 
-bool Renderer::Init(void *) { last_error_ = "renderer unavailable on host"; return false; }
+bool Renderer::Init(void *, int) { last_error_ = "renderer unavailable on host"; return false; }
 bool Renderer::DetachSurface() { return false; }
 bool Renderer::AttachWindow(void *) { return false; }
 bool Renderer::HasRetainedContext() const { return false; }
