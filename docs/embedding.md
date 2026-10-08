@@ -51,6 +51,11 @@ Remaining or consumer-specific boundaries:
   Consumers that originally searched only the legacy C++ spellings must also
   resolve these existing C exports. The Tyranor integration has that fallback;
   this does not imply that other shells were exercised.
+  These hooks publish NativeActivity worker intent and separately control the
+  DebugBridge-owned context under its host mutex. DebugBridge install/tag calls
+  use that same mutex; the non-owning `Current` registry is not used to select an
+  audio target. A pause requested before installation is inherited by its new
+  session before the init script can start sounds.
 - Physical Android volume UP/DOWN/MUTE events now return to default system
   dispatch instead of the game's 137/136 bindings. Unknown keys and unsupported
   actions are unconsumed. Recognized ordinary key edges remain game input.
@@ -70,6 +75,11 @@ Activity pause or an unavailable surface pauses script/animation clocks and
 audio, and discards stale queued input. Resume reattaches the surface, reapplies
 the swap interval, restores the clocks and forces a redraw. Legacy sound-only
 JNI pause intent remains separate from Activity/session pause.
+Suspension drops physical release edges without calling Lua. A drawable resume
+first handles a pending script reset; otherwise it cancels the old drag, clears
+its moved marker and dispatches at most one `dragout` before accepting new input.
+An unavailable/lost context never dispatches that deferred callback; reset drops
+cancellation state belonging to the old VM.
 
 A real `EGL_CONTEXT_LOST` is a different state. CPU session state is retained
 and rendering is suspended; lossless GL reconstruction is not implemented.
@@ -149,7 +159,7 @@ unavailable. Enabling the option alone does not prove a decoder was linked.
    `Open` may load a different game. Accessor references are then invalid.
 
 All mutable engine calls require host serialization. `Current` is a non-owning
-registry for legacy JNI hooks, not a concurrency or ownership API. Embedded hosts
+registry, not a concurrency or ownership API. Embedded hosts
 need not register themselves. The existing dialog callback is synchronous; an
 unset callback cancels the request. An asynchronous Flutter dialog requires a
 separate host/API change.

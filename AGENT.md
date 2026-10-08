@@ -222,8 +222,11 @@ rg 'make_unique<PackManager>|make_unique<LuaEngine>' src  # 只应命中 core/en
 - 显式会话重启（如 `[reset]` tag）统一走 `ResetSession()`，不要手动
   `lua.reset()`；`Shutdown()` 才释放 compositor/audio/packs。普通后台/窗口替换
   不重启会话；真正 context loss 当前暂停渲染，不自动销毁 VM 后重跑 boot。
-- 跨宿主查询（JNI 音频暂停钩子等）用 `EngineContext::Current()/SetCurrent()`
-  注册表；它是引用登记，不承担所有权，`Shutdown()` 会自动摘除。
+- `EngineContext::Current()/SetCurrent()` 是非拥有引用登记，不能用它推断宿主
+  所有权或直接跨线程操作对象图；`Shutdown()` 会自动摘除。JNI 音频钩子向
+  NativeActivity 工作线程发布意图，另在 DebugBridge 的宿主锁内操作其自有会话。
+- 暂停只清物理输入，不运行可能访问 GL 的 `dragout`；有可绘制上下文时先处理
+  已有 `[reset]`，否则再取消旧拖拽与移动标记，随后才接收新输入。
 - **LuaEngine 不再拥有 Audio/AudioChannels**：`Init` 收非拥有指针，析构只清
   `videos_/emotes_`；`[alldelete]` 用 `Audio::StopAll()` + `AudioChannels::Reset()`
   而不是 `delete/new`。音频指针为空时音频 tag 自然 no-op（门控已存在）。

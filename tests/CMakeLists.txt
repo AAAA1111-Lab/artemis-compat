@@ -43,6 +43,16 @@ add_test(NAME android_renderer_lifecycle_regressions
 set_tests_properties(android_renderer_lifecycle_regressions PROPERTIES
     ENVIRONMENT "ARTC_SWAP_INTERVAL=1")
 
+# Compile the production JNI bridge; a recording Audio backend and a synthetic
+# JNI function table let the test observe ownership and serialization without
+# a VM, OpenSL device, GL context or commercial content. NDK supplies jni.h.
+if(ANDROID)
+    add_executable(debug_bridge_audio_regressions
+        debug_bridge_audio_regressions.cpp ../src/jni/jni_bridge.cpp)
+    target_link_libraries(debug_bridge_audio_regressions PRIVATE artemis::core)
+    add_test(NAME debug_bridge_audio_regressions COMMAND debug_bridge_audio_regressions)
+endif()
+
 add_executable(engine_context_regressions engine_context_regressions.cpp)
 target_link_libraries(engine_context_regressions PRIVATE artemis::core)
 add_test(NAME engine_context_regressions COMMAND engine_context_regressions)
@@ -223,4 +233,11 @@ if(ARTC_TEST_CGL)
     target_compile_definitions(emote_preview PRIVATE
         ARTC_HAS_GLES=1 ARTC_USE_DESKTOP_GL=1 ARTC_TEST_CGL=1)
     target_link_libraries(emote_preview PRIVATE artemis_deps "-framework OpenGL")
+endif()
+
+# Synthetic hit geometry exercises host pause and Lua drag behavior without GL.
+if(_artc_graphics STREQUAL "HEADLESS")
+    add_executable(session_pause_regressions session_pause_regressions.cpp)
+    target_link_libraries(session_pause_regressions PRIVATE artemis::core)
+    add_test(NAME session_pause_regressions COMMAND session_pause_regressions)
 endif()
