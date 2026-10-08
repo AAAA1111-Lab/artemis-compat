@@ -1,6 +1,6 @@
 // renderer.h — EGL/GLES2 render surface for the compat engine.
 //
-// M2.0 scope: context lifecycle (init per native window, resize, shutdown)
+// M2.0 scope: context lifecycle (retained across native windows, resize, shutdown)
 // and frame presentation (clear + swap). Layer compositing and texture
 // drawing land in M2.1 on top of this.
 //
@@ -21,6 +21,12 @@ class Renderer {
 public:
     // Create EGL/GLES context bound to the native window.
     bool Init(void *native_window);
+    // A window surface can disappear without losing the EGL context or scene.
+    // Parking on a tiny pbuffer keeps GL objects valid until a new window exists.
+    bool DetachSurface();
+    bool AttachWindow(void *native_window);
+    bool HasRetainedContext() const;
+    bool ContextLost() const { return context_lost_; }
     bool RefreshSize();
     bool HasCurrentContext() const;
     // Called when the window geometry changes.
@@ -51,8 +57,12 @@ private:
 #if defined(__ANDROID__)
     EGLDisplay display_ = EGL_NO_DISPLAY;
     EGLSurface surface_ = EGL_NO_SURFACE;
+    EGLSurface parking_surface_ = EGL_NO_SURFACE;
+    EGLConfig config_ = nullptr;
     EGLContext context_ = EGL_NO_CONTEXT;
     void *window_ = nullptr;
+    void SetEglError(const char *operation);
+    void ApplySwapInterval();
 #endif
     bool ready_ = false;
     bool context_lost_ = false;

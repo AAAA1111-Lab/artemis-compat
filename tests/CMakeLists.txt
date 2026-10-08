@@ -28,6 +28,21 @@ if(ANDROID)
     add_test(NAME android_input_policy_regressions COMMAND android_input_policy_regressions)
 endif()
 
+# The fake headers and EGL calls compile the production Android renderer on
+# any host. They are scoped to this executable, never to artemis_core/libartemis.
+add_executable(android_renderer_lifecycle_regressions
+    android_renderer_lifecycle_regressions.cpp ../src/render/renderer.cpp)
+target_compile_features(android_renderer_lifecycle_regressions PRIVATE cxx_std_17)
+target_compile_definitions(android_renderer_lifecycle_regressions PRIVATE
+    __ANDROID__=1 ARTC_HAS_GLES=1)
+target_include_directories(android_renderer_lifecycle_regressions PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/fake_android_renderer"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+add_test(NAME android_renderer_lifecycle_regressions
+    COMMAND android_renderer_lifecycle_regressions)
+set_tests_properties(android_renderer_lifecycle_regressions PROPERTIES
+    ENVIRONMENT "ARTC_SWAP_INTERVAL=1")
+
 add_executable(engine_context_regressions engine_context_regressions.cpp)
 target_link_libraries(engine_context_regressions PRIVATE artemis::core)
 add_test(NAME engine_context_regressions COMMAND engine_context_regressions)
