@@ -90,6 +90,12 @@ background/resume acceptance must be reported separately from fake-EGL tests.
 
 ### Optional full-stage presentation
 
+This optional interface is intended for host-side image filter processing, such
+as super-resolution, sharpening and resampling, after full-stage composition and
+before display viewport scaling. The host supplies the filter algorithms and any
+filter-chain UI; the engine does not depend on a filter library or a downstream
+product.
+
 `src/render/presentation.h` provides `ArtcPresentationCallbacksV1`. Registration
 before `ANativeActivity_onCreate` copies the versioned structure. The callback is
 synchronous on the current render context and borrows the completed full-stage
