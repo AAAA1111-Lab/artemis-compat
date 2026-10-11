@@ -18,7 +18,7 @@ target_link_libraries(my_runtime PRIVATE artemis::core)
 
 As a subdirectory, CLI, JNI and Cocoa hosts default to off. A standalone macOS
 configure still builds the CLI and Cocoa host. `ARTC_BUILD_JNI=ON` builds the
-original Android shared library from the same core and unchanged JNI sources.
+original Android shared library from the same core and preserved JNI interfaces.
 Lua and the core are position independent; platform libraries propagate to the
 final consumer. `tests/embedded_consumer` demonstrates a shared-library consumer
 and rejects accidentally enabled upstream hosts.
@@ -39,24 +39,54 @@ whose `com.ies_net.artemis.ArtemisActivity` is Kotlin source. Its
   native key input, video completion, dialogs, pause/resume and exit through this
   actual host, in addition to checking the original shell contract.
 
-This build integration leaves `src/jni` unchanged. Source and symbol inspection
-found existing gaps that require a separate Android compatibility change:
+The Android bridge explicitly registers `(III)V` PAD for a host declaring
+that descriptor while preserving the legacy string export. Source and export
+checks still do not establish full shell compatibility.
 
-- Tyranor declares `OnReadyPlayAssetDelivery(int, int, int)`, but the engine's
-  short-name export accepts `jstring`. The existing `__III` export does not fix
-  this: [JNI resolution tries the short name first](https://docs.oracle.com/en/java/javase/21/docs/specs/jni/design.html#resolving-native-method-names).
-  Invoking that callback can therefore bind an incompatible native signature.
-- `EmulateKeyEvent` and `OnFinishVideo` only log. `ExecuteTag` addresses the
-  separate DebugBridge context, not the active NativeActivity context.
-- Tyranor's bundled audio bridge looks up
-  `_ZN7artemis12CSoundDevice16PauseAllInstanceEv` and
-  `_ZN7artemis12CSoundDevice17ResumeAllInstanceEv`. The engine currently exports
-  the unmangled `PauseAllInstance` / `ResumeAllInstance` names, so those bridge
-  lookups cannot resolve them.
+Remaining or consumer-specific boundaries:
 
-The Android library compiles and retains its entry points; Tyranor-Next runtime
-compatibility is not established by those checks. No Android device run was
-performed for this build integration.
+- `EmulateKeyEvent` and `OnFinishVideo` still only log. `ExecuteTag` addresses
+  the separate DebugBridge context, not the active NativeActivity context.
+- The engine exports unmangled `PauseAllInstance` / `ResumeAllInstance`.
+  Consumers that originally searched only the legacy C++ spellings must also
+  resolve these existing C exports. The Tyranor integration has that fallback;
+  this does not imply that other shells were exercised.
+  These hooks publish NativeActivity worker intent and separately control the
+  DebugBridge-owned context under its host mutex. DebugBridge install/tag calls
+  use that same mutex; the non-owning `Current` registry is not used to select an
+  audio target. A pause requested before installation is inherited by its new
+  session before the init script can start sounds.
+- Physical Android volume UP/DOWN/MUTE events now return to default system
+  dispatch instead of the game's 137/136 bindings. Unknown keys and unsupported
+  actions are unconsumed. Recognized ordinary key edges remain game input.
+- Pointer MOVE events are fully initialized before publication under the input
+  mutex; the consumer may swap the queue immediately after publication.
+
+### Android window and session recovery
+
+An ordinary NativeActivity pause or window-surface replacement does not imply
+loss of the EGL context. The renderer creates a compatible parking pbuffer;
+when the window disappears it binds the existing context there, releases only
+the window surface, and attaches a replacement surface to that same context.
+The Lua VM, script cursor, layers and glyph pages remain in the opened session.
+Window replacement does not call `ResetSession` or rerun `BootFramework`.
+
+Activity pause or an unavailable surface pauses script/animation clocks and
+audio, and discards stale queued input. Resume reattaches the surface, reapplies
+the swap interval, restores the clocks and forces a redraw. Legacy sound-only
+JNI pause intent remains separate from Activity/session pause.
+Suspension drops physical release edges without calling Lua. A drawable resume
+first handles a pending script reset; otherwise it cancels the old drag, clears
+its moved marker and dispatches at most one `dragout` before accepting new input.
+An unavailable/lost context never dispatches that deferred callback; reset drops
+cancellation state belonging to the old VM.
+
+A real `EGL_CONTEXT_LOST` is a different state. CPU session state is retained
+and rendering is suspended; lossless GL reconstruction is not implemented.
+The engine does not silently run the boot chain to mask this failure. Explicit
+script `[reset]` remains a requested session restart. This policy does not restore
+a session after Android kills the process. Original-shell and actual-device
+background/resume acceptance must be reported separately from fake-EGL tests.
 
 ## Backend selection
 
@@ -102,13 +132,15 @@ unavailable. Enabling the option alone does not prove a decoder was linked.
    already passed through the Lua filter; dispatch them with filtering disabled.
 4. `ResetSession` drops Lua and runner but retains audio, packs and compositor.
    Hosts that stop audio during resets must explicitly stop voices and reset
-   logical channels. Original Android reset/window policies are unchanged.
+   logical channels. The Android host uses it for an explicit script reset,
+   not ordinary window detach/reattach or as a substitute for lossless context
+   recovery. Its actual context-loss behavior is described above.
 5. Call `Shutdown` while GL is still current, before destroying the host context.
    It releases the graph and restores configuration defaults. A subsequent
    `Open` may load a different game. Accessor references are then invalid.
 
 All mutable engine calls require host serialization. `Current` is a non-owning
-registry for legacy JNI hooks, not a concurrency or ownership API. Embedded hosts
+registry, not a concurrency or ownership API. Embedded hosts
 need not register themselves. The existing dialog callback is synchronous; an
 unset callback cancels the request. An asynchronous Flutter dialog requires a
 separate host/API change.

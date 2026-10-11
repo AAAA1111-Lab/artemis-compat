@@ -17,6 +17,7 @@
 // M0: symbols exist, log activity, and delegate to the engine core where the
 // subsystem exists (tag text is forwarded to the Lua `e:tag` path).
 #include "core/engine_context.h"
+#include "jni/host_lifecycle.h"
 #include "log/logger.h"
 #include "pack/pack_manager.h"
 #include "script/lua_engine.h"
@@ -209,12 +210,10 @@ Java_com_ies_1net_artemis_ArtemisActivity_OnReadyPlayAssetDelivery__III(JNIEnv *
 extern "C" __attribute__((visibility("default"))) void
 PauseAllInstance() {
     artc::Log(kLogInfo, "PauseAllInstance");
-    if (auto *ctx = EngineContext::Current(); ctx && ctx->Started())
-        ctx->lua().PauseAudio();
+    artc::RequestAudioPause(true);
 }
 extern "C" __attribute__((visibility("default"))) void
 ResumeAllInstance() {
     artc::Log(kLogInfo, "ResumeAllInstance");
-    if (auto *ctx = EngineContext::Current(); ctx && ctx->Started())
-        ctx->lua().ResumeAudio();
+    artc::RequestAudioPause(false);
 }
