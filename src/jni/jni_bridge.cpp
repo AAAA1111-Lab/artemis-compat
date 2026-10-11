@@ -11,8 +11,8 @@
 //   OnReadyPlayAssetDelivery(String)        Java -> engine: PAD assets ready
 //   OnReadyPlayAssetDelivery(int, int, int)  exported with the __III suffix
 //   moe.artemis.gui.Dialog.OnClose(int, String, long)  dialog closed
-// The PAD short/long signatures need reconciliation with the host declarations;
-// retained export names alone do not establish compatibility. See docs/embedding.md.
+// JNI_OnLoad binds the Kotlin III descriptor explicitly when present; the
+// original String entry point remains available to the legacy shell.
 //
 // M0: symbols exist, log activity, and delegate to the engine core where the
 // subsystem exists (tag text is forwarded to the Lua `e:tag` path).
@@ -38,8 +38,30 @@ std::unique_ptr<EngineContext> g_ctx;
 bool EngineReady() { return g_ctx && g_ctx->Started(); }
 } // namespace
 
-jint JNI_OnLoad(JavaVM *, void *) {
+extern "C" JNIEXPORT void JNICALL
+Java_com_ies_1net_artemis_ArtemisActivity_OnReadyPlayAssetDelivery__III(JNIEnv*, jobject, jint, jint, jint);
+
+jint JNI_OnLoad(JavaVM *vm, void *) {
     artc::Log(kLogInfo, "compat engine: JNI_OnLoad");
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
+    jclass activity = env->FindClass("com/ies_net/artemis/ArtemisActivity");
+    if (activity) {
+        jmethodID pad = env->GetMethodID(activity, "OnReadyPlayAssetDelivery", "(III)V");
+        if (pad) {
+            JNINativeMethod method = {const_cast<char*>("OnReadyPlayAssetDelivery"),
+                const_cast<char*>("(III)V"), reinterpret_cast<void*>(
+                    Java_com_ies_1net_artemis_ArtemisActivity_OnReadyPlayAssetDelivery__III)};
+            if (env->RegisterNatives(activity, &method, 1) != JNI_OK) {
+                env->ExceptionClear(); env->DeleteLocalRef(activity); return JNI_ERR;
+            }
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear(); // Original shell declares the String variant.
+        }
+        env->DeleteLocalRef(activity);
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear(); // Headless/test consumers do not load a Java shell.
+    }
     return JNI_VERSION_1_6;
 }
 
