@@ -28,6 +28,7 @@
 // subsystem exists (tag text is forwarded to the Lua `e:tag` path).
 #include "core/engine_context.h"
 #include "jni/jni_util.h"
+#include "jni/host_lifecycle.h"
 #include "log/logger.h"
 #include "pack/pack_manager.h"
 #include "script/lua_engine.h"
@@ -182,16 +183,14 @@ Java_com_ies_1net_artemis_ArtemisActivity_OnReadyPlayAssetDelivery__III(JNIEnv *
                             std::to_string(b) + "," + std::to_string(c));
 }
 
-// Host-shell lifecycle audio hooks — real mute/unmute of the active mixer
-// voices on onPause/onResume. Shared by the mangled and unmangled exports.
+// Host-shell lifecycle audio hooks publish intent for the engine worker.
+// Shared by the mangled and unmangled exports.
 namespace {
 void PauseAllVoices() {
-    if (auto *ctx = EngineContext::Current(); ctx && ctx->Started())
-        ctx->lua().PauseAudio();
+    artc::RequestAudioPause(true);
 }
 void ResumeAllVoices() {
-    if (auto *ctx = EngineContext::Current(); ctx && ctx->Started())
-        ctx->lua().ResumeAudio();
+    artc::RequestAudioPause(false);
 }
 } // namespace
 
