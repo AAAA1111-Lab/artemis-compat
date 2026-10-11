@@ -26,6 +26,7 @@
 #include <jni.h>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 
 using namespace artc;
@@ -35,8 +36,23 @@ namespace {
 // The headless DebugBridge bootstrap has no GL context, so it uses
 // EngineContext::Start(false) — no compositor.
 std::unique_ptr<EngineContext> g_ctx;
+// Only this bridge owns g_ctx. JNI calls can arrive on different Java threads;
+// serialize replacement, script work and direct headless audio operations.
+std::mutex g_debug_mutex;
+bool g_debug_audio_paused = false;
 
+// Caller holds g_debug_mutex; never use the NativeActivity Current registry.
 bool EngineReady() { return g_ctx && g_ctx->Started(); }
+
+void ApplyAudioPause(bool paused) {
+    std::lock_guard<std::mutex> lock(g_debug_mutex);
+    RequestAudioPause(paused); // NativeActivity still consumes intent on its worker.
+    g_debug_audio_paused = paused;
+    if (EngineReady()) {
+        if (paused) g_ctx->lua().PauseAudio();
+        else g_ctx->lua().ResumeAudio();
+    }
+}
 } // namespace
 
 extern "C" JNIEXPORT void JNICALL
@@ -73,6 +89,7 @@ JNIEXPORT void JNICALL
 Java_com_ies_1net_artemis_ArtemisActivity_ExecuteTag(JNIEnv *env, jobject, jstring data) {
     const char *s = env->GetStringUTFChars(data, nullptr);
     artc::Log(kLogInfo, std::string("ExecuteTag: ") + (s ? s : ""));
+    std::lock_guard<std::mutex> lock(g_debug_mutex);
     // M0: route through the Lua bridge tag table so script-visible state stays
     // in sync; M1 replaces this with the native tag dispatcher.
     if (EngineReady() && s) {
@@ -174,6 +191,7 @@ Java_com_ies_1net_artemis_debug_DebugBridge_nativeInstall(JNIEnv *env, jclass,
         artc::Log(kLogError, "nativeInstall: bad key hex");
         return;
     }
+    std::lock_guard<std::mutex> lock(g_debug_mutex);
     // Headless assembly: no GL context on this path, so no compositor
     // (matches the historical DebugBridge behavior exactly).
     g_ctx = std::make_unique<artc::EngineContext>();
@@ -187,6 +205,7 @@ Java_com_ies_1net_artemis_debug_DebugBridge_nativeInstall(JNIEnv *env, jclass,
         g_ctx.reset();
         return;
     }
+    if (g_debug_audio_paused) g_ctx->lua().PauseAudio();
     artc::EngineContext::SetCurrent(g_ctx.get());
     artc::Log(kLogInfo, "nativeInstall: engine ready, packs=" +
                             std::to_string(g_ctx->packs().Packs().size()));
@@ -210,10 +229,10 @@ Java_com_ies_1net_artemis_ArtemisActivity_OnReadyPlayAssetDelivery__III(JNIEnv *
 extern "C" __attribute__((visibility("default"))) void
 PauseAllInstance() {
     artc::Log(kLogInfo, "PauseAllInstance");
-    artc::RequestAudioPause(true);
+    ApplyAudioPause(true);
 }
 extern "C" __attribute__((visibility("default"))) void
 ResumeAllInstance() {
     artc::Log(kLogInfo, "ResumeAllInstance");
-    artc::RequestAudioPause(false);
+    ApplyAudioPause(false);
 }
