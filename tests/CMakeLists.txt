@@ -21,6 +21,13 @@ foreach(backend gles desktop)
     add_test(NAME shader_backend_${backend} COMMAND shader_backend_${backend})
 endforeach()
 
+if(ANDROID)
+    add_executable(android_input_policy_regressions android_input_policy_regressions.cpp)
+    target_compile_features(android_input_policy_regressions PRIVATE cxx_std_17)
+    target_include_directories(android_input_policy_regressions PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+    add_test(NAME android_input_policy_regressions COMMAND android_input_policy_regressions)
+endif()
+
 add_executable(engine_context_regressions engine_context_regressions.cpp)
 target_link_libraries(engine_context_regressions PRIVATE artemis::core)
 add_test(NAME engine_context_regressions COMMAND engine_context_regressions)
