@@ -154,6 +154,9 @@ int main() {
     // Simulate a native window handing out a discarded/different back buffer.
     glClearColor(0,1,0,1); glClear(GL_COLOR_BUFFER_BIT);
     Check(c.BeginTransition(0,1000,{},0,0,0), "capture retained scene");
+    Check(c.PendingBlockingAnimationMs(0)==1000 &&
+          c.PendingBlockingAnimationMs(500)==500,
+          "finite transition remains a blocking script barrier");
     const unsigned char blue[4] = {0,0,255,255};
     glBindTexture(GL_TEXTURE_2D,tex);
     glTexSubImage2D(GL_TEXTURE_2D,0,0,0,1,1,GL_RGBA,GL_UNSIGNED_BYTE,blue);
