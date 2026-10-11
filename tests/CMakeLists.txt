@@ -25,6 +25,10 @@ add_executable(engine_context_regressions engine_context_regressions.cpp)
 target_link_libraries(engine_context_regressions PRIVATE artemis::core)
 add_test(NAME engine_context_regressions COMMAND engine_context_regressions)
 
+add_executable(system_voice_regressions system_voice_regressions.cpp)
+target_link_libraries(system_voice_regressions PRIVATE artemis_core)
+add_test(NAME system_voice_regressions COMMAND system_voice_regressions)
+
 add_executable(runtime_regressions runtime_regressions.cpp)
 target_link_libraries(runtime_regressions PRIVATE artemis_core)
 add_test(NAME runtime_regressions COMMAND runtime_regressions)

@@ -114,6 +114,28 @@ int main() {
     Check(fs::exists(saves / "system.dat"), "system data written outside game directory");
     Check(!fs::exists(b / "system.dat"), "explicit save path leaves game directory untouched");
     ctx.Shutdown();
+    // An unguarded framework callback may abort that function, but must not
+    // corrupt the VM stack or prevent later boot instructions from running.
+    // This verifies the existing protected boundary; it does not invent a
+    // catalog schema or claim incomplete game initialization is repaired.
+    const auto faulty = root / "faulty-catalog";
+    fs::create_directories(faulty);
+    write(faulty, {{"system/first.iet", R"([lua]
+        function boot_sysvo(e,p)
+            assert(e:file('absent.csv'), 'synthetic missing system-voice catalog')
+        end
+    [/lua]
+    [calllua function=boot_sysvo]
+    [lua]
+        after_sysvo_error=29
+        assert(user_func_sysvo==nil and type(conf)=='table')
+    [/lua]
+    )"}});
+    Check(ctx.Open(faulty.string(), "android") && ctx.Start(false), "initialize catalog error boot");
+    Check(ctx.BootFramework(), "protected callback failure does not abort the boot interpreter");
+    Check(ctx.lua().DoString("assert(after_sysvo_error==29)", "boot callback boundary"),
+          "boot instructions after a callback failure still execute");
+    ctx.Shutdown();
     fs::remove_all(root);
     return failures ? 1 : 0;
 }
