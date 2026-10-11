@@ -76,6 +76,10 @@ performed for this build integration.
 The mangled and unmangled audio hooks publish the same NativeActivity worker
 intent; they do not select a session through the non-owning Current registry.
 The worker consumes that intent separately from Activity/session pause.
+DebugBridge installation, tag execution and its direct audio operations use one
+host mutex. The hooks also apply the request to the DebugBridge-owned context;
+a pause requested before installation is inherited before its init script can
+start sounds. Neither audio path uses Current() to infer session ownership.
 
 ### Android window and session recovery
 
