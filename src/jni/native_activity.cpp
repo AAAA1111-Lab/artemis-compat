@@ -278,9 +278,10 @@ int OnInputEvent(int, int, void *data) {
                 handled = true;
             } else if (action == AMOTION_EVENT_ACTION_MOVE) {
                 // drag continuation — no key edge, updates the pointer only
-                EnqueueInput({false, false, 1, true, x, y});
-                g_state.input_queue_events.back().is_move = true;
-                g_state.input_queue_events.back().down = false;
+                // Publish the complete move under EnqueueInput's mutex:
+                // the consumer can swap the queue immediately after unlock.
+                EngineState::RawInput move{false, true, 1, false, x, y};
+                EnqueueInput(move);
                 handled = true;
             } else if (action == AMOTION_EVENT_ACTION_UP ||
                        action == AMOTION_EVENT_ACTION_POINTER_UP ||
