@@ -143,6 +143,12 @@ endif()
 # system EGL/GLES). Off by default.
 option(ARTC_TEST_GLES "Run compositor regressions using desktop ANGLE" OFF)
 if(ARTC_TEST_GLES)
+    add_executable(font_style_regressions font_style_regressions.cpp)
+    target_compile_definitions(font_style_regressions PRIVATE
+        ARTC_TEST_DATA="${ARTC_TEST_DATA_DIR}")
+    target_link_libraries(font_style_regressions PRIVATE artemis_core)
+    add_test(NAME font_style_regressions COMMAND font_style_regressions)
+
     add_executable(compositor_regressions compositor_regressions.cpp)
     if(ARTC_TEST_MOVIE)
         target_sources(compositor_regressions PRIVATE "${ARTC_TEST_MOVIE}")
