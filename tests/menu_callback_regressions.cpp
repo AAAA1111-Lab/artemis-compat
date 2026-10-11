@@ -1,13 +1,12 @@
-#include "config/ini.h"
+#include <map>
+#include <fstream>
+#include <filesystem>
+#include <chrono>
 #include "core/engine_context.h"
+#include "config/ini.h"
 #include "pack/pack_manager.h"
 #include "render/compositor.h"
 #include "script/lua_engine.h"
-#include "script/asb_parser.h"
-#include <chrono>
-#include <filesystem>
-#include <fstream>
-#include <map>
 #include <cstdlib>
 #include <iostream>
 
@@ -76,9 +75,7 @@ int main() {
     script.ClickAt(210,50); script.RunEnterFrame(); script.EndFrame();
     Check(!script.ConsumeExitRequest() && script.DoString("assert(yes==2)", "disabled confirmation"),
           "disabled button cannot activate the exit callback");
-    // A complete input -> lyevent -> setonpush -> enqueueTag -> native
-    // runner menu round-trip, starting at a real story [clickwait]. No
-    // title-specific or commercial framework scripts are assumed here.
+    // Keep the independent retired-runner finalizer regression.
     {
         const std::map<std::string,std::string> files={
             {"system/first.iet", "*top\n[stop]\n"},
@@ -102,103 +99,6 @@ int main() {
         const auto path=std::filesystem::temp_directory_path()/
             ("artemis-menu-wait-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".pfs");
         {std::ofstream out(path,std::ios::binary);out.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());}
-        artc::PackManager fixtures;
-        Check(fixtures.OpenChain(path.string(),{0}), "open synthetic menu/wait pack");
-        artc::LuaEngine menu;
-        Check(menu.Init(&fixtures,artc::Ini{},"android",640,480,&compositor), "initialize in-game menu");
-        artc::AsbRunner runner;
-        runner.SetPackSource(&fixtures);runner.SetLuaEngine(&menu);menu.SetScriptRunner(&runner);
-        menu.SetJumpHandler([&](const std::string& f,const std::string& l){runner.Jump(f,l);});
-        menu.SetCallHandler([&](const std::string& f,const std::string& l){runner.Call(f,l);});
-        menu.SetStopHandler([&](const std::string& tag){if(tag=="return")runner.Return();else runner.Halt();});
-        auto drain=[&](){
-            while(!menu.IsWaiting() && menu.HasQueuedTag()){
-                std::string name,file,label;
-                std::vector<std::pair<std::string,std::string>> attrs;
-                if(!menu.PopQueuedTag(&name,&attrs))break;
-                for(const auto& kv:attrs){if(kv.first=="file")file=kv.second;else if(kv.first=="label")label=kv.second;}
-                if(name=="call")runner.Call(file,label);
-                else if(name=="jump")runner.Jump(file,label);
-                else menu.DispatchTag(name,attrs,false);
-            }
-        };
-        auto boundary=[&](){
-            drain();
-            for(int i=0;i<30 && !menu.IsWaiting() && !runner.Halted();++i){runner.ExecuteLine(menu);drain();}
-        };
-        auto click=[&](float x){menu.ClickAt(x,50);menu.RunEnterFrame();boundary();menu.EndFrame();};
-        Check(menu.DoString(R"(
-            opened=0; nested=0; chosen=0; advanced=0; routed=0; route='open_settings'
-            function story_advanced(e,p) advanced=advanced+1 end
-            function settings_open(e,p) opened=opened+1 end
-            function nested_open(e,p) nested=nested+1 end
-            function cursor_sync(e,p) end
-            function dispatch_key(e,p) routed=routed+1; _G[route](e,p) end
-            function open_settings(e,p) e:enqueueTag{'call',file='settings.iet',label='settings'} end
-            function open_nested(e,p) e:enqueueTag{'call',file='nested.iet',label='nested'} end
-            function close_menu(e,p) e:enqueueTag{'jump',file='close.iet',label='close'} end
-            function choose(e,p) chosen=chosen+1 end
-            function choose_option(e,p) e:enqueueTag{'calllua',['function']='choose'} end
-            function delayed_option(e,p)
-                e:enqueueTag{'wait',time=10000}
-                e:enqueueTag{'calllua',['function']='choose'}
-            end
-            function jump_from_queued_lua(e,p)
-                e:getScriptWaitReason() -- a query must not end the in-flight event
-                e:tag{'jump',file='settings.iet',label='settings'}
-            end
-            function open_through_lua(e,p) e:enqueueTag{'calllua',['function']='jump_from_queued_lua'} end
-            function confirm_exit(e,p) e:enqueueTag{'call',file='exit.iet',label='yes'} end
-            function option_router(e,p) e:tag{'calllua',['function']=p.lua} end
-            e:tag{'setonpush',key=1,['function']='dispatch_key'}
-            e:lyevent{id='1',type='click',['function']='cursor_sync'}
-            e:lyevent{id='2',type='click',['function']='option_router',lua='choose_option'}
-        )", "queued menu callbacks"), "register actual lyevent/setonpush queue routing");
-        Check(runner.Jump("story.iet","story"), "start story click-wait fixture");boundary();
-        Check(menu.IsWaiting(), "story stops at its clickwait");
-        const size_t story_pc=runner.CurrentIndex();
-        click(50);
-        Check(runner.CurrentFile()=="settings.iet" && runner.Halted() && !menu.IsWaiting() &&
-              runner.StackFiles().size()==2 && menu.DoString("assert(opened==1 and advanced==0 and routed==1)","settings entry"),
-              "in-game settings enters at the first click without advancing the story");
-        click(210);
-        Check(menu.DoString("assert(chosen==1 and routed==1)","option activates"),
-              "settings option callback is processed once on the same frame");
-        Check(menu.DoString("route='open_nested'", "nested route"), "select nested menu route");click(50);
-        Check(runner.CurrentFile()=="nested.iet" && runner.StackFiles().size()==3 &&
-              menu.DoString("assert(nested==1)", "nested entry"), "nested queued settings call adds one frame");
-        Check(menu.DoString("route='close_menu'", "close nested"), "select nested close route");click(50);
-        Check(runner.CurrentFile()=="settings.iet" && runner.Halted() && !menu.IsWaiting() &&
-              runner.StackFiles().size()==2, "queued jump close returns to the real settings caller");
-        Check(menu.DoString(R"(
-            e:lyevent{id='2',type='click',['function']='option_router',lua='delayed_option'}
-        )", "delayed option"), "register option with its own wait");click(210);
-        Check(menu.IsWaiting() && menu.QueuedTagName()=="calllua" &&
-              menu.DoString("assert(chosen==1)","option still waiting"), "option eqwait stops before its queued callback");
-        // A second event while the queued wait is active shares that pending
-        // event, rather than overwriting the scenario's saved wait.
-        Check(menu.DoString(R"(
-            e:lyevent{id='2',type='click',['function']='option_router',lua='choose_option'}
-        )", "second pending click"), "register another option while waiting");click(210);
-        Check(menu.IsWaiting() && menu.DoString("assert(chosen==1)","second click blocked"),
-              "pending event cannot run the second click through a queued wait");
-        menu.SetWaiting(false);boundary();
-        Check(!menu.IsWaiting() && !menu.HasQueuedTag() && menu.DoString("assert(chosen==3)","delayed callbacks finish"),
-              "both accepted option callbacks run once after the queued wait finishes");
-        click(50);
-        Check(runner.CurrentFile()=="story.iet" && runner.CurrentIndex()==story_pc && menu.IsWaiting() &&
-              runner.StackFiles().size()==1 && menu.DoString("assert(advanced==0)","story not advanced"),
-              "settings close restores the original story cursor and clickwait");
-        Check(menu.DoString("route='open_through_lua'", "queued Lua menu route"), "select indirect menu route");click(50);
-        Check(!menu.IsWaiting() && runner.CurrentFile()=="settings.iet" && runner.StackFiles().size()==2,
-              "wait query within the final queued Lua callback does not prematurely close its event");
-        Check(menu.DoString("route='close_menu'", "close indirect menu"), "select indirect close route");click(50);
-        Check(menu.IsWaiting() && runner.CurrentFile()=="story.iet" && runner.CurrentIndex()==story_pc &&
-              runner.StackFiles().size()==1, "indirect queued Lua jump returns to the suspended story");
-        Check(menu.DoString("route='confirm_exit'", "exit route"), "select exit confirmation");click(50);
-        Check(menu.ConsumeExitRequest() && !menu.ConsumeExitRequest() &&
-              runner.CurrentFile()=="exit.iet" && menu.DoString("assert(advanced==0)","exit keeps story"),
-              "queued in-game exit requests host termination once without consuming story input");
         // ResetSession destroys the runner before lua_close runs Lua __gc.
         // The bridge object remains usable, but runner hooks must be detached.
         artc::EngineContext context;

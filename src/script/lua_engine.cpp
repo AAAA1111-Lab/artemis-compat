@@ -1870,11 +1870,6 @@ void LuaEngine::RestoreWait(const WaitState& state) {
     auto_timer_.Restore(NowMs(), state.auto_elapsed);
 }
 
-bool LuaEngine::IsExecutingLua() const {
-    lua_Debug frame;
-    return L_ && lua_getstack(L_, 0, &frame) != 0;
-}
-
 // [wt]/[wait] style time waits: hold the runner until the deadline passes.
 void LuaEngine::SetTimedWait(int ms, bool accept_input) {
     wait_until_ = ClockNow() + std::chrono::milliseconds(ms);
@@ -1886,7 +1881,6 @@ void LuaEngine::SetTimedWait(int ms, bool accept_input) {
 // Polled once per frame: auto-clears an expired timed wait so the runner
 // resumes without user input. Called by the frame loop before stepping.
 bool LuaEngine::IsWaiting() {
-    if (script_runner_) script_runner_->FinishQueuedEvent(*this, waiting_);
     if(!video_wait_.empty()) {
         if(videos_.count(video_wait_)) return true;
         // SetWaiting(false) announces onClickWaitOut first; video_wait_ must
@@ -1928,7 +1922,6 @@ bool LuaEngine::IsWaiting() {
         }
         wait_reason_pending_ = pending;
     }
-    if (script_runner_) script_runner_->FinishQueuedEvent(*this, waiting_);
     return waiting_;
 }
 
@@ -2213,7 +2206,7 @@ int LuaEngine::l_enqueueTag(lua_State *L) {
         }
         lua_pop(L, 1);
     }
-    self->EnqueueTag(name, attrs);
+    self->tag_queue_.emplace_back(name, std::move(attrs));
     Log(kLogDebug, std::string("enqueueTag: ") + name);
     return 0;
 }
@@ -2222,7 +2215,6 @@ bool LuaEngine::EnqueueTag(const std::string &name,
                            const std::vector<std::pair<std::string, std::string>> &attrs) {
     if (!L_) return false;
     tag_queue_.emplace_back(name, attrs);
-    ++queued_tag_revision_;
     return true;
 }
 

@@ -310,8 +310,6 @@ uint64_t AsbRunner::BeginEvent(LuaEngine& lua) {
     event_halted_ = halted_;
     event_entry_ = ++next_event_;
     event_revision_ = flow_revision_;
-    event_queue_revision_ = lua.QueuedTagRevision();
-    event_deferred_ = false;
     return event_entry_;
 }
 
@@ -320,7 +318,6 @@ void AsbRunner::DiscardFlow() {
     event_entry_=0;
     event_wait_valid_=false;
     event_lua_=nullptr;
-    event_deferred_=false;
     ++flow_revision_;
     loaded_=false;
     halted_=true;
@@ -329,16 +326,6 @@ void AsbRunner::DiscardFlow() {
 void AsbRunner::EndEvent(uint64_t token) {
     if (!token || token != event_entry_) return;
     if (flow_revision_ == event_revision_) {
-        // enqueueTag/eqtag handlers yield their transfer until the host's
-        // next command boundary. Restoring the story wait here would block
-        // that drain permanently. Keep it beside the event until a queued
-        // call adopts it, a jump transfers it, or the queued work finishes.
-        // Older work alone must not bypass a scenario wait.
-        if (event_wait_valid_ && event_lua_ && event_lua_->HasQueuedTag() &&
-            event_lua_->QueuedTagRevision() != event_queue_revision_) {
-            event_deferred_ = true;
-            return;
-        }
         // Handler made no control transfer: hand the suspended wait back.
         if (event_wait_valid_ && event_lua_) event_lua_->RestoreWait(event_wait_);
     } else if (event_wait_valid_ && event_lua_ && !event_halted_) {
@@ -361,21 +348,6 @@ void AsbRunner::EndEvent(uint64_t token) {
     event_wait_valid_ = false;
     event_lua_ = nullptr;
     event_entry_ = 0;
-    event_deferred_ = false;
-}
-
-void AsbRunner::FinishQueuedEvent(LuaEngine& lua, bool waiting) {
-    if (!event_deferred_ || event_lua_ != &lua) return;
-    // A popped final calllua still owns this event while Lua executes.
-    // getScriptWaitReason/IsWaiting inside it is a query, not the host's
-    // completed-command boundary, even though the queue is already empty.
-    if (lua.IsExecutingLua()) return;
-    // Close immediately after a transfer so nested menu input gets its own
-    // event. Otherwise a queued wait owns the active wait until it ends;
-    // only an empty, unblocked queue restores the original scenario wait.
-    if (!event_wait_valid_ || flow_revision_ != event_revision_ ||
-        (!waiting && !lua.HasQueuedTag()))
-        EndEvent(event_entry_);
 }
 
 std::vector<std::string> AsbRunner::StackFiles() const {
