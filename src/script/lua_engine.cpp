@@ -687,6 +687,13 @@ LuaEngine *LuaEngine::Self(lua_State *L) {
 }
 
 LuaEngine::~LuaEngine() {
+    // EngineContext retires the runner before closing Lua. Finalizers may
+    // still query the live bridge, but must not reach that destroyed runner
+    // through either the wait poll or a captured native flow callback.
+    script_runner_ = nullptr;
+    jump_handler_ = {};
+    call_handler_ = {};
+    stop_handler_ = {};
     videos_.clear(); // players release their output before Audio is destroyed
     emotes_.clear();
     // Audio / AudioChannels are non-owning (EngineContext owns them).

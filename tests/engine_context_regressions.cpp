@@ -11,6 +11,8 @@
 namespace fs = std::filesystem;
 namespace {
 int failures = 0;
+int gc_completed = 0;
+int RecordGc(lua_State *) { ++gc_completed; return 0; }
 void Check(bool ok, const char *what) {
     if (!ok) { ++failures; std::cerr << "FAIL: " << what << "\n"; }
 }
@@ -135,6 +137,41 @@ int main() {
     Check(ctx.BootFramework(), "protected callback failure does not abort the boot interpreter");
     Check(ctx.lua().DoString("assert(after_sysvo_error==29)", "boot callback boundary"),
           "boot instructions after a callback failure still execute");
+    ctx.Shutdown();
+    // ResetSession retires the runner before lua_close executes __gc.
+    // Finalizers may query the bridge but must not invoke retired flow hooks.
+    const auto finalizer = root / "retired-runner-finalizer";
+    fs::create_directories(finalizer);
+    write(finalizer, {{"system/first.iet", "*top\n[stop]\n"},
+                      {"story.iet", "*story\n[clickwait]\n[stop]\n"},
+                      {"settings.iet", "*settings\n[stop]\n"}});
+    const bool ready = ctx.Open(finalizer.string(), "android") &&
+                       ctx.Start(false) && ctx.BootFramework();
+    Check(ready, "boot synthetic finalizer session");
+    if (ready) {
+        int retired_hook_calls = 0;
+        ctx.lua().SetJumpHandler([&](const std::string &, const std::string &) { ++retired_hook_calls; });
+        ctx.lua().SetCallHandler([&](const std::string &, const std::string &) { ++retired_hook_calls; });
+        ctx.lua().SetStopHandler([&](const std::string &) { ++retired_hook_calls; });
+        lua_pushcfunction(ctx.lua().state(), RecordGc);
+        lua_setglobal(ctx.lua().state(), "record_gc");
+        Check(ctx.lua().DoString(R"(
+            assert(#e:getScriptStack() > 0)
+            session_gc=newproxy(true)
+            getmetatable(session_gc).__gc=function()
+                e:getScriptWaitReason()
+                assert(#e:getScriptStack() == 0)
+                e:tag{'jump',file='story.iet',label='story'}
+                e:tag{'call',file='settings.iet',label='settings'}
+                e:tag{'stop'}
+                record_gc()
+            end
+        )", "session finalizer"), "retain finalizer until reset");
+        ctx.ResetSession();
+        Check(gc_completed == 1 && retired_hook_calls == 0 && !ctx.Started(),
+              "Lua finalizer cannot invoke a retired runner's hooks");
+        Check(ctx.Start(false) && ctx.BootFramework(), "session reboots after finalizer teardown");
+    }
     ctx.Shutdown();
     fs::remove_all(root);
     return failures ? 1 : 0;
