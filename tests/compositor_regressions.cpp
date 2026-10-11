@@ -280,6 +280,9 @@ int main() {
     Check(edge[0]==0 && edge[2]==0,"outline darkens the border");
     Check(fill[0]==255 && fill[2]==255,"glyph uses em-sized fill");
     Check(second[0]==255 && second[2]==255,"explicit newline places a second line");
+    auto outline_gap=At(10,12);
+    Check(outline_gap[0]==0 && outline_gap[2]==255,
+          "outlined row height reserves effect padding between lines");
     Check(c.SetText("2","A\nA",10,0xffffff,30,
         {{"rubysize","6"},{"spacemiddle","-3"},{"spacebottom","-1"},
          {"left","2"},{"top","1"}}), "reserve ruby row before line spacing");
