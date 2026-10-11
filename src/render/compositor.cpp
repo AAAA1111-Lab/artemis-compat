@@ -8,7 +8,7 @@
 // KrKr2-Next: the GLES2 compositor is also used on OpenHarmony (the host
 // bridge makes an EGL context current before driving it). ARTC_HAS_GLES is
 // set by cpp/artemis/CMakeLists.txt for every platform with a GLES2 sysroot.
-#if defined(__ANDROID__) && !defined(ARTC_HAS_GLES)
+#if defined(__ANDROID__) && !defined(ARTC_HAS_GLES) && !defined(ARTC_HEADLESS)
 #define ARTC_HAS_GLES 1
 #endif
 
