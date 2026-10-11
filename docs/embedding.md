@@ -88,6 +88,31 @@ script `[reset]` remains a requested session restart. This policy does not resto
 a session after Android kills the process. Original-shell and actual-device
 background/resume acceptance must be reported separately from fake-EGL tests.
 
+### Optional full-stage presentation
+
+This optional interface is intended for host-side image filter processing, such
+as super-resolution, sharpening and resampling, after full-stage composition and
+before display viewport scaling. The host supplies the filter algorithms and any
+filter-chain UI; the engine does not depend on a filter library or a downstream
+product.
+
+`src/render/presentation.h` provides `ArtcPresentationCallbacksV1`. Registration
+before `ANativeActivity_onCreate` copies the versioned structure. The callback is
+synchronous on the current render context and borrows the completed full-stage
+texture. It includes actual stage dimensions, display viewport, context
+generation, revision and orientation; it does not expose individual scene
+roles or exclude game text.
+
+Returning 0 or the original texture passes through. A replacement is host-owned,
+retains full-stage coverage and orientation, may have different pixel dimensions,
+and must survive the final presentation draw. The host restores changed GL state
+and never deletes the borrowed source. DESTROYING runs with a current context;
+LOST only abandons handles. Registration survives scene resets. The presented
+notification follows a successful real swap, not a static redraw attempt.
+Ordinary window reattachment reports a surface resize with the retained context
+generation; it does not issue context-destroyed/created events. Genuine context
+loss emits LOST and suspends rendering, as described above.
+
 ## Backend selection
 
 `ARTC_GRAPHICS_BACKEND` accepts AUTO, HEADLESS, GLES or DESKTOP_GL.

@@ -20,13 +20,14 @@ namespace artc {
 class Renderer {
 public:
     // Create EGL/GLES context bound to the native window.
-    bool Init(void *native_window);
+    bool Init(void *native_window, int preferred_gles_version = 2);
     // A window surface can disappear without losing the EGL context or scene.
     // Parking on a tiny pbuffer keeps GL objects valid until a new window exists.
     bool DetachSurface();
     bool AttachWindow(void *native_window);
     bool HasRetainedContext() const;
     bool ContextLost() const { return context_lost_; }
+    int GlesVersion() const { return gles_version_; }
     bool RefreshSize();
     bool HasCurrentContext() const;
     // Called when the window geometry changes.
@@ -64,6 +65,7 @@ private:
     void SetEglError(const char *operation);
     void ApplySwapInterval();
 #endif
+    int gles_version_ = 2;
     bool ready_ = false;
     bool context_lost_ = false;
     bool swap_paced_ = false;   // eglSwapInterval(1) applied successfully
