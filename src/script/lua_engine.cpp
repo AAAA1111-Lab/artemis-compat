@@ -925,16 +925,11 @@ bool LuaEngine::Init(PackManager *packs, const Ini &systemIni,
         lua_setglobal(L_, "conf");
     }
     lua_pop(L_, 1);
-    // sysvo personality hook: the media framework calls _G["user_func_sysvo"]
-    // (ex.user_sysvo) when present. Until game voices are implemented, install
-    // a no-op so the generic sysvo path (which reads the sysvo csv tables)
-    // isn't the fall-through — voice playback stays silent and non-fatal.
-    lua_getglobal(L_, "user_func_sysvo");
-    if (lua_isnil(L_, -1)) {
-        lua_pushcfunction(L_, [](lua_State *) { return 0; });
-        lua_setglobal(L_, "user_func_sysvo");
-    }
-    lua_pop(L_, 1);
+    // Leave user_func_sysvo absent until the game's framework installs its
+    // own personality hook. A native no-op here hides the framework's generic
+    // system-voice path, even though seplay/voplay are already supported.
+    // CSV selection and missing-data policy belong to that framework; errors
+    // still pass through the normal traceback-protected Lua call boundary.
     // movie_play guard: the asb *movie_play chain (movie_init → calllua
     // movie_play) runs on the "continue from save" path too, but our save
     // bank doesn't persist `scr.movie` — so scr.movie is nil there and
