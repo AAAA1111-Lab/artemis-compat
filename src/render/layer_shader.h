@@ -13,10 +13,18 @@ struct LayerEffect {
     float grayscale=0.0f;
     uint32_t multiply=0xffffff;
     int intermediate=0;
-    // Explicit draw-order hint (smaller = earlier/behind). 0 = default order.
-    // E-mote rear layers (back hair) use -1; the compositor sorts by this
-    // before the id order while everything else keeps the id semantics.
+    // Explicit owner-local extension, only a same-Z tie. Never inferred from
+    // authored labels. Ancestor effect groups are indivisible.
     int paint=0;
+    // Diagnostic membership flag; it does not select a pairwise comparator.
+    bool emote_tree=false;
+    // Explicit external scene ID and postorder rank. The child-before-own-art
+    // ordering is a provisional compatibility policy, not a proven native rule.
+    std::string emote_owner;
+    int emote_order=-1;
+    // Runtime sampled additive coord[2], ascending inside this owner/effect
+    // boundary. This is not global Artemis layer Z and cannot cross owners.
+    double emote_z=0;
     // E-mote stencil composite: the alpha of this stage-space mask texture is
     // multiplied into the layer (0 = no mask). Set through
     // Compositor::SetLayerStageMask / RenderStageMask, not through props.

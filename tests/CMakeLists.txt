@@ -95,6 +95,14 @@ add_executable(emote_timeline_regressions emote_timeline_regressions.cpp)
 target_link_libraries(emote_timeline_regressions PRIVATE artemis_core)
 add_test(NAME emote_timeline_regressions COMMAND emote_timeline_regressions)
 
+add_executable(emote_sync_regressions emote_sync_regressions.cpp)
+target_link_libraries(emote_sync_regressions PRIVATE artemis_core)
+add_test(NAME emote_sync_regressions COMMAND emote_sync_regressions)
+
+add_executable(emote_combinator_scene_regressions emote_combinator_scene_regressions.cpp)
+target_link_libraries(emote_combinator_scene_regressions PRIVATE artemis_core)
+add_test(NAME emote_combinator_scene_regressions COMMAND emote_combinator_scene_regressions)
+
 add_executable(runtime_state_regressions runtime_state_regressions.cpp)
 target_link_libraries(runtime_state_regressions PRIVATE artemis_core)
 add_test(NAME runtime_state_regressions COMMAND runtime_state_regressions)
@@ -188,3 +196,15 @@ if(ARTC_TEST_CGL)
         ARTC_HAS_GLES=1 ARTC_USE_DESKTOP_GL=1 ARTC_TEST_CGL=1)
     target_link_libraries(emote_preview PRIVATE artemis_deps "-framework OpenGL")
 endif()
+
+add_executable(emote_control_regressions emote_control_regressions.cpp)
+target_link_libraries(emote_control_regressions PRIVATE artemis_core)
+add_test(NAME emote_control_regressions COMMAND emote_control_regressions)
+
+add_executable(emote_control_player_regressions emote_control_player_regressions.cpp)
+target_link_libraries(emote_control_player_regressions PRIVATE artemis_core)
+add_test(NAME emote_control_player_regressions COMMAND emote_control_player_regressions)
+
+add_executable(emote_mirror_regressions emote_mirror_regressions.cpp)
+target_link_libraries(emote_mirror_regressions PRIVATE artemis_core)
+add_test(NAME emote_mirror_regressions COMMAND emote_mirror_regressions)

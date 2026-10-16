@@ -23,6 +23,13 @@ bool ParseMeshPatch(const std::vector<float> &points, int *side);
 bool SampleMeshPatch(const std::vector<float> &points, int side, float u, float v,
                      float *out_xy);
 
+// Explicit polynomial extrapolation for a 4x4 cubic Bernstein patch. Unlike
+// SampleMeshPatch, u/v are NOT clamped. This opt-in helper does not change any
+// existing scene sampling scope. Rejects nonfinite inputs/results; leaves output
+// untouched on failure. Control coordinates may be outside [0,1].
+bool SampleCubicMeshPatchExtrapolated(const std::vector<float> &points, float u, float v,
+                                    float *out_xy);
+
 // Build a `side`x`side` normalized triangulated grid by sampling the patch.
 // out_xy is 2 floats per vertex; out_indices is 6 per cell (two triangles).
 bool BuildDeformedGrid(const std::vector<float> &points, int side, int side_out,

@@ -11,9 +11,10 @@ std::pair<float, float> Lerp(std::pair<float, float> a, std::pair<float, float> 
     return {a.first + (b.first - a.first) * t, a.second + (b.second - a.second) * t};
 }
 
-std::pair<float, float> BezierPatch(const std::vector<float> &p, float u, float v) {
-    auto basis = [](float value) {
-        const float x = std::clamp(value, 0.0f, 1.0f);
+std::pair<float, float> BezierPatch(const std::vector<float> &p, float u, float v,
+                                  bool clamp_domain = true) {
+    auto basis = [clamp_domain](float value) {
+        const float x = clamp_domain ? std::clamp(value, 0.0f, 1.0f) : value;
         const float inv = 1.0f - x;
         return std::array<float, 4>{inv * inv * inv, 3 * inv * inv * x, 3 * inv * x * x,
                                     x * x * x};
@@ -97,6 +98,18 @@ bool BuildDeformedGrid(const std::vector<float> &points, int side, int side_out,
             for (uint32_t v : {a, b, c, b, d, c}) out_indices->push_back(v);
         }
     }
+    return true;
+}
+
+bool SampleCubicMeshPatchExtrapolated(const std::vector<float> &points, float u, float v,
+                                    float *out_xy) {
+    if (!out_xy || points.size() != 32 || !std::isfinite(u) || !std::isfinite(v) ||
+        !std::all_of(points.begin(), points.end(), [](float p) { return std::isfinite(p); }))
+        return false;
+    const auto result = BezierPatch(points, u, v, false);
+    if (!std::isfinite(result.first) || !std::isfinite(result.second)) return false;
+    out_xy[0] = result.first;
+    out_xy[1] = result.second;
     return true;
 }
 

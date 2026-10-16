@@ -23,6 +23,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -248,6 +249,8 @@ public:
     // stale handle (after lydel or a same-id replace) fails soft instead
     // of dangling.
     EmotePlayer *FindEmote(const std::string &id);
+    // Identity belongs to the registry entry, not to its reusable layer id.
+    std::weak_ptr<const void> EmoteLifetime(const std::string &id) const;
     // E-mote hit test (`contains`/`hitTest`): resolves the layer and runs the
     // shape query against the live compositor transforms.
     bool EmoteHitTest(const std::string &id, const std::string &label, double x, double y);
@@ -472,7 +475,15 @@ private:
     std::map<std::string, std::unique_ptr<VideoPlayer>> videos_;
     // E-mote layers by id (e:createEmoteLayer); ticked every frame, never
     // auto-expired (the model's base motion keeps them animating).
-    std::map<std::string, std::unique_ptr<EmotePlayer>> emotes_;
+    struct EmoteInstance {
+        std::unique_ptr<EmotePlayer> player;
+        std::shared_ptr<const void> lifetime;
+        EmotePlayer *get() const { return player.get(); }
+        EmotePlayer *operator->() const { return player.get(); }
+    };
+    // Erasing/clearing an entry expires every proxy for that instance. The
+    // token owns no player/engine and there is no retained per-id history.
+    std::map<std::string, EmoteInstance> emotes_;
     std::string video_wait_;
     int video_skip_ = 0;
     // message pipeline: chgmsg-selected layer + accumulated print text

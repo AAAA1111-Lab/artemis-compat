@@ -9,6 +9,8 @@
 #include "emote_scene_fixture.h"
 #include <zlib.h>
 #include "render/compositor.h"
+#include "render/emote_player.h"
+#include "log/logger.h"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -16,6 +18,7 @@
 #include <iostream>
 #include <map>
 #include <thread>
+#include <vector>
 #if defined(ARTC_HAS_GLES)
 #include <EGL/egl.h>
 #endif
@@ -43,6 +46,90 @@ public:
         std::abort();
     }
 };
+
+static void EmoteProxyLifetimeRegression(artc::PackManager& packs, const artc::Ini& ini) {
+    artc::Compositor compositor;
+    bool finalized_after_removal=false;
+    std::weak_ptr<const void> destroyed_token;
+    const auto root=std::filesystem::temp_directory_path()/
+        ("artemis-emote-lifetime-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root);
+    {
+        artc::LuaEngine engine;
+        engine.SetSaveDir(root.string());
+        Check(engine.Init(&packs,ini,"android",32,32,&compositor),"proxy lifetime engine init");
+        Check(engine.DoString(R"(
+            function assertRemoved(m)
+                for _,method in ipairs{m.getVariable,m.GetVariable,m.setVariable,m.SetVariable,
+                    m.setVariableDiff,m.SetVariableDiff,m.getVariableDiff,m.GetVariableDiff,
+                    m.getCoord,m.GetCoord,m.contains,m.Contains,m.hitTest,m.HitTest} do
+                    local ok,err=method(m) -- removed takes precedence over invalid arguments
+                    assert(ok==nil and err=='E-mote layer removed')
+                end
+            end
+            local first=e:createEmoteLayer{id='life.child',files={'emote.psb'},progress=false}
+            local alias=e:getEmoteLayer{id='life.child',next=true}
+            assert(first:setVariable('expression',3))
+            assert(alias:GetVariable('expression')==3)
+            for _,files in ipairs{{'missing.psb'},{'broken.psb'},{}, {'emote.psb','emote.psb'}} do
+                assert(e:createEmoteLayer{id='life.child',files=files}==nil)
+                assert(first:getVariable('expression')==3 and alias:GetVariable('expression')==3)
+            end
+            local fresh=e:createEmoteLayer{id='life.child',files={'emote.psb'},progress=false}
+            assert(fresh:getVariable('expression')==0)
+            assertRemoved(first); assertRemoved(alias)
+            local current=e:getEmoteLayer('life.child')
+            fresh=nil; first=nil; alias=nil; collectgarbage('collect')
+            assert(current:setVariable('expression',7)) -- GC never removes the player
+            assert(e:getEmoteLayer('life.child'):GetVariable('expression')==7)
+            e:tag{'lydel',id='life'} -- ancestor deletion expires child instance
+            local recreated=e:createEmoteLayer{id='life.child',files={'emote.psb'},progress=false}
+            assertRemoved(current)
+            e:tag{'lydel',id='life.child'}
+            local again=e:createEmoteLayer{id='life.child',files={'emote.psb'},progress=false}
+            assertRemoved(recreated)
+            snapshot_old=again
+            function restore_lifetime(e)
+                assert(e:getEmoteLayer('life.child')==nil)
+                snapshot_current=e:createEmoteLayer{id='life.child',files={'emote.psb'},progress=false}
+                assertRemoved(snapshot_old)
+            end
+            e:setEventHandler{onLoad='restore_lifetime'}
+        )","proxy instance identity"),"same-id replacement, failed creation, deletion, aliases and GC respect instance identity");
+        std::vector<uint8_t> snapshot;
+        Check(artc::EncodeVariableBank({},true,snapshot) &&
+              artc::WriteSaveFile((root/"lifetime.dat").string(),snapshot),"write synthetic proxy lifetime checkpoint");
+        Check(engine.LoadSnapshot("lifetime.dat"),"snapshot clear expires old proxy before restorer recreates same id");
+        destroyed_token=engine.EmoteLifetime("life.child");
+        Check(!destroyed_token.expired(),"live registry owns the instance token");
+        lua_State* L=engine.state();
+        lua_pushlightuserdata(L,&finalized_after_removal);
+        lua_pushcclosure(L,[](lua_State* state) -> int {
+            auto* result=static_cast<bool*>(lua_touserdata(state,lua_upvalueindex(1)));
+            *result=lua_toboolean(state,1)!=0;
+            return 0;
+        },1);
+        lua_setglobal(L,"mark_lifetime_finalized");
+        Check(engine.DoString(R"(
+            local held=snapshot_current
+            function finalize_lifetime()
+                local ok,err=held:GetVariable('expression')
+                mark_lifetime_finalized(ok==nil and err=='E-mote layer removed')
+            end
+        )","proxy shutdown finalizer"),"install proxy check for engine shutdown");
+        // A normal Lua userdata finalizer runs while lua_close is active,
+        // after LuaEngine has cleared the registry but before engine memory dies.
+        lua_newuserdata(L,1);
+        lua_newtable(L);
+        lua_getglobal(L,"finalize_lifetime");
+        lua_setfield(L,-2,"__gc");
+        lua_setmetatable(L,-2);
+        lua_setglobal(L,"lifetime_finalizer");
+    }
+    Check(destroyed_token.expired() && finalized_after_removal,
+          "engine destruction expires token before Lua finalizers and retained aliases remain safe");
+    std::filesystem::remove_all(root); // only this freshly created test-owned root
+}
 
 int main(int argc, char** argv) {
 #if defined(ARTC_HAS_GLES)
@@ -881,7 +968,7 @@ int main(int argc, char** argv) {
 
     // A synthetic PSB inside its own pack drives the full success path. The
     // local document adds a second variable so the native difference pair
-    // (SetVariableDiff) has two model variables to drive.
+    // (SetVariableDiff) has two declared labels for ordered-pair controls.
     auto emote_document = emote_fixture::PlayerDocument();
     emote_document.root.object["metadata"].object["variableList"].array.push_back(
         emote_fixture::O({{"label", emote_fixture::S("partner")}}));
@@ -893,8 +980,29 @@ int main(int argc, char** argv) {
                 {"coord",emote_fixture::A({emote_fixture::N(20),emote_fixture::N(10),emote_fixture::N(0)})},
                 {"zx",emote_fixture::N(2)},{"zy",emote_fixture::N(2)}})),
             emote_fixture::Key(11,0)})));
+    // E17's restorer owns this small selector contract; it is not a model
+    // merge format or a reproduction of any game's save graph.
+    auto restorer_document = emote_document;
+    // A clock-only timeline keeps these safety checks independent of E3's
+    // changing authored-track command semantics. Variable transitions below
+    // are script-owned, not competing with a timeline expression track.
+    restorer_document.root.object["metadata"].object["timelineControl"]=emote_fixture::A({
+        emote_fixture::O({{"label",emote_fixture::S("safety_loop")},
+            {"lastTime",emote_fixture::N(-1)},{"loopBegin",emote_fixture::N(0)},
+            {"loopEnd",emote_fixture::N(20)},{"diff",emote_fixture::N(0)},
+            {"variableList",emote_fixture::A({})}})});
+    restorer_document.root.object["metadata"].object["selectorControl"]=emote_fixture::A({
+        emote_fixture::O({{"label",emote_fixture::S("wardrobe")},
+            {"enabled",emote_fixture::N(1)},
+            {"optionList",emote_fixture::A({
+                emote_fixture::O({{"label",emote_fixture::S("expression")},
+                    {"onValue",emote_fixture::N(20)},{"offValue",emote_fixture::N(0)}}),
+                emote_fixture::O({{"label",emote_fixture::S("partner")},
+                    {"onValue",emote_fixture::N(1)},{"offValue",emote_fixture::N(0)}})})}})});
     const std::map<std::string,std::vector<uint8_t>> emote_files = {
-        {"emote.psb", emote_fixture::EncodePsb(emote_document)}
+        {"emote.psb", emote_fixture::EncodePsb(emote_document)},
+        {"models/restorer.psb", emote_fixture::EncodePsb(restorer_document)},
+        {"broken.psb", {'n','o','t','-','p','s','b'}}
     };
     std::vector<unsigned char> emote_pack;
     auto eu32=[&](uint32_t v){ for(int i=0;i<4;++i) emote_pack.push_back((v>>(i*8))&255); };
@@ -912,9 +1020,605 @@ int main(int argc, char** argv) {
     { std::ofstream f(emote_path,std::ios::binary); f.write(reinterpret_cast<const char*>(emote_pack.data()),emote_pack.size()); }
     artc::PackManager emote_packs;
     Check(emote_packs.OpenChain(emote_path.string(),{0}), "open synthetic E-mote pack");
+    EmoteProxyLifetimeRegression(emote_packs,ini);
     artc::Compositor emote_compositor;
     artc::LuaEngine emote;
     Check(emote.Init(&emote_packs,ini,"android",1280,720,&emote_compositor), "E-mote engine init");
+    // E7: both files really exist and decode individually. Unsupported
+    // multi-file creation must fail before destroying the old same-id scene,
+    // proxy target, controls, playback, or clock. Never invent merge semantics.
+    Check(emote.DoString(R"(
+        local single=e:createEmoteLayer{id='e7_single',files={'models/restorer.psb'},progress=false}
+        assert(single and single:setVariable('wardrobe',1))
+        e:tag{'lydel',id='e7_single'}
+        e7=e:createEmoteLayer{id='e7',files={'models/restorer.psb'},progress=false}
+        assert(e7 and e7:playTimeline('safety_loop',1))
+        assert(e7:setVariable('expression',3) and e7:setVariable('partner',2))
+        e7:setCoord(12,34,5,90)
+        e7:progress(7)
+        assert(e7:setVariable('partner',14,12,0))
+        assert(e7:setTimelineBlendRatio('safety_loop',0.75))
+        assert(e7:setTimelineBlendRatio('safety_loop',0.25,12,0,0))
+        e7:progress(3)
+        function e7_unchanged()
+            for _,m in ipairs{e7,e:getEmoteLayer('e7')} do
+                assert(m:getVariable('expression')==3 and m:getVariable('partner')==5)
+                assert(m:countPlayingTimelines()==1 and m:isTimelinePlaying('safety_loop'))
+                assert(m:getPlayingTimelineLabelAt(0)=='safety_loop' and m:getPlayingTimelineFlagsAt(0)==1)
+                assert(m:getTimelineBlendRatio('safety_loop')==0.625 and m:getAnimating())
+                local x,y=m:getCoord(); assert(x==12 and y==34 and m:getRot()==90)
+            end
+        end
+        e7_unchanged()
+    )","E7 live replacement setup"),"E7 seeds a live proxy and nonzero clock with pending controls");
+    emote.RunEnterFrame();
+    auto* const e7_player=emote.FindEmote("e7");
+    const double e7_frame=e7_player->BaseFrame();
+    const auto e7_revision=emote_compositor.Revision();
+    const auto e7_layers=emote_compositor.Layers().size();
+    Check(e7_frame==10 && emote_compositor.GetLayerInfo("e7").found,"E7 existing scene is installed");
+    std::vector<std::string> e7_logs;
+    artc::SetLogSink([&](int,const std::string& message){e7_logs.push_back(message);});
+    const bool e7_rejected=emote.DoString(R"(
+        for _,files in ipairs{{'emote.psb','models/restorer.psb'},
+                              {'models/restorer.psb','emote.psb'}} do
+            assert(e:createEmoteLayer{id='e7',files=files,progress=true,width=64,height=64}==nil)
+            e7_unchanged()
+        end
+    )","E7 two real files rejected");
+    artc::SetLogSink({});
+    Check(e7_rejected && e7_logs==std::vector<std::string>(2,
+          "createEmoteLayer: multi-file E-mote archives are not supported"),
+          "E7 explicitly rejects both real-file orders rather than silently loading the first file");
+    Check(emote.DoString(R"(
+        assert(e:createEmoteLayer{id='e7',files={}}==nil); e7_unchanged()
+        assert(e:createEmoteLayer{id='e7'}==nil); e7_unchanged()
+        assert(e:createEmoteLayer{id='e7',files={'missing.psb'}}==nil); e7_unchanged()
+        assert(e:createEmoteLayer{id='e7',files={'broken.psb'}}==nil); e7_unchanged()
+    )","E7 zero and invalid single files"),"E7 zero/missing/invalid file boundaries preserve the existing proxy");
+    Check(emote.FindEmote("e7")==e7_player && e7_player->BaseFrame()==e7_frame &&
+          !e7_player->AutoProgress() && e7_player->GetZ()==5 &&
+          emote_compositor.Revision()==e7_revision && emote_compositor.Layers().size()==e7_layers,
+          "E7 rejected creation preserves player identity, clock, progress mode and compositor scene");
+    Check(emote.DoString(R"(
+        e7:progress(3)
+        assert(e7:getVariable('partner')==8 and e7:getTimelineBlendRatio('safety_loop')==0.5)
+        assert(e7:countPlayingTimelines()==1 and e7:isTimelinePlaying('safety_loop'))
+    )","E7 pending controls survive"),"E7 failure neither cancels nor duplicates subsequent variable/blend progression");
+    Check(e7_player->BaseFrame()==13,"E7 subsequent explicit progress advances the original clock once");
+    Check(emote.DoString(R"(
+        local replacement=e:createEmoteLayer{id='e7',files={'emote.psb'},progress=false}
+        assert(replacement and replacement:getVariable('expression')==0)
+        assert(replacement:getVariable('partner')==0 and replacement:countPlayingTimelines()==0)
+    )","E7 valid single-file replacement"),"E7 a valid single file still replaces the same id after rejected multi-file attempts");
+    Check(emote.FindEmote("e7")->BaseFrame()==0 && !emote_compositor.GetLayerInfo("e7").found,
+          "E7 successful replacement resets its own clock and removes the old installed subtree");
+    Check(emote.DoString("e:tag{'lydel',id='e7'}","E7 cleanup"),"remove E7 synthetic player");
+
+    // E17 proof only: our script explicitly owns elapsed frames, current
+    // values, targets and remaining linear transition durations. The existing
+    // ARCV variable-bank + atomic save_storage pipeline persists that graph,
+    // NOT EmotePlayer private state. One manually driven loop can be replayed
+    // from start; arbitrary timeline phases/queues/blinks/RNG cannot be inferred
+    // from the public getters. This is not proof that real games need no E17.
+    const auto restorer_root=std::filesystem::temp_directory_path()/
+        ("artemis-emote-restorer-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    Check(std::filesystem::create_directory(restorer_root),"create fresh isolated E17 save root");
+    const char* restorer_source=R"(
+        save_calls=0; load_calls=0; frame_calls=0
+        function advance_emote(n)
+            model:progress(n)
+            logical.elapsed=logical.elapsed+n
+            logical.remaining=math.max(0,logical.remaining-n)
+        end
+        function save_emote(e,p)
+            save_calls=save_calls+1
+            assert(p.file=='synthetic.dat')
+            local x,y=model:getCoord()
+            local data={version=1,asset='models/restorer.psb',id='restored',
+                expression=model:getVariable('expression'),selector=model:getVariable('wardrobe'),
+                timeline=model:getPlayingTimelineLabelAt(0),flags=model:getPlayingTimelineFlagsAt(0),
+                blend=model:getTimelineBlendRatio('safety_loop'),elapsed=logical.elapsed,
+                remaining=logical.remaining,target=logical.target,blend_target=logical.blend_target,
+                x=x,y=y,angle=model:getRot()}
+            assert(model:countPlayingTimelines()==1)
+            e:tag{'var',name='emote_checkpoint',data=pluto.persist({},data)}
+        end
+        function load_emote(e,p)
+            load_calls=load_calls+1
+            assert(p.file=='synthetic.dat' and e:getEmoteLayer('restored')==nil)
+            local data=pluto.unpersist({},e:var('emote_checkpoint'))
+            assert(data.version==1 and data.elapsed==3 and data.remaining==9)
+            logical={elapsed=data.elapsed,remaining=data.remaining,
+                target=data.target,blend_target=data.blend_target}
+            model=assert(e:createEmoteLayer{id=data.id,files={data.asset},progress=false})
+            assert(model:playTimeline(data.timeline,data.flags))
+            model:progress(data.elapsed) -- replay our explicit single-loop history
+            assert(model:setVariable('expression',data.expression))
+            assert(model:setVariable('wardrobe',data.selector))
+            assert(model:setTimelineBlendRatio(data.timeline,data.blend))
+            model:setCoord(data.x,data.y,0,data.angle)
+            assert(model:setVariable('expression',data.target,data.remaining,0))
+            assert(model:setTimelineBlendRatio(data.timeline,data.blend_target,data.remaining,0,0))
+        end
+        function tick_emote(e)
+            frame_calls=frame_calls+1
+            advance_emote(1) -- progress=false: exactly one script-owned step
+        end
+        e:setEventHandler{onSave='save_emote',onLoad='load_emote'}
+    )";
+    {
+        artc::Compositor saving_compositor;
+        artc::LuaEngine saving;
+        saving.SetSaveDir(restorer_root.string());
+        Check(saving.Init(&emote_packs,ini,"android",32,32,&saving_compositor),"E17 saver init in new test root");
+        Check(saving.DoString(restorer_source,"E17 original restorer script") && saving.DoString(R"(
+            logical={elapsed=0,remaining=12,target=14,blend_target=0.25}
+            model=assert(e:createEmoteLayer{id='restored',files={'models/restorer.psb'},progress=false})
+            assert(model:playTimeline('safety_loop',1))
+            model:setCoord(17,23,0,45)
+            assert(model:setVariable('wardrobe',0.25) and model:setVariable('expression',2))
+            assert(model:setVariable('expression',14,12,0))
+            assert(model:setTimelineBlendRatio('safety_loop',0.75))
+            assert(model:setTimelineBlendRatio('safety_loop',0.25,12,0,0))
+            advance_emote(3)
+            assert(model:getVariable('expression')==5 and model:getTimelineBlendRatio('safety_loop')==0.625)
+        )","E17 logical scene"),"E17 prepares only self-authored script state");
+        Check(saving.SaveSnapshot("synthetic.dat"),"E17 commits checkpoint through onSave and atomic ARCV pipeline");
+        Check(saving.DoString("assert(save_calls==1 and load_calls==0)","E17 save callback count"),"E17 onSave runs once");
+    } // The original player, Lua VM and compositor are gone before restoration.
+    std::vector<uint8_t> checkpoint;
+    artc::VariableBank checkpoint_bank;
+    Check(artc::ReadSaveFile((restorer_root/"synthetic.dat").string(),checkpoint) &&
+          checkpoint.size()>4 && std::string(checkpoint.begin(),checkpoint.begin()+4)=="ARCV" &&
+          artc::DecodeVariableBank(checkpoint,true,checkpoint_bank) && checkpoint_bank.size()==1 &&
+          checkpoint_bank.count("emote_checkpoint")==1,
+          "E17 slot is our ARCV graph, not a private-player serializer or native BOWS export");
+    {
+        artc::Compositor restored_compositor;
+        artc::LuaEngine restored;
+        restored.SetSaveDir(restorer_root.string());
+        Check(restored.Init(&emote_packs,ini,"android",32,32,&restored_compositor),"E17 cold restorer init");
+        Check(restored.DoString(restorer_source,"E17 cold callback install") && restored.DoString(R"(
+            assert(model==nil and logical==nil and e:getEmoteLayer('restored')==nil)
+            e:tag{'var',name='emote_checkpoint',data='replace this system-bank copy from the slot'}
+        )","E17 no player before load"),"E17 fresh VM has no implicitly restored player");
+        Check(restored.LoadSnapshot("synthetic.dat"),"E17 restores the saved graph through existing onLoad pipeline");
+        Check(restored.DoString(R"(
+            assert(load_calls==1 and save_calls==0 and frame_calls==0)
+            assert(model:getVariable('expression')==5 and model:getVariable('wardrobe')==0.25)
+            assert(model:isTimelinePlaying('safety_loop') and model:countPlayingTimelines()==1)
+            assert(model:getPlayingTimelineLabelAt(0)=='safety_loop' and model:getPlayingTimelineFlagsAt(0)==1)
+            assert(model:getTimelineBlendRatio('safety_loop')==0.625)
+            local x,y=model:getCoord(); assert(x==17 and y==23 and model:getRot()==45)
+        )","E17 restored public state"),"E17 expression, selector, timeline, blend and placement match explicit saved fields");
+        Check(restored.FindEmote("restored")->BaseFrame()==3 && !restored.FindEmote("restored")->AutoProgress(),
+              "E17 script replays its explicit elapsed history without enabling wall-clock progress");
+        auto restorer_picture_width=[&]() {
+            int sum=0;
+            for(const auto& layer:restored_compositor.Layers())
+                if(layer.id.rfind("restored.",0)==0 && layer.id.size()>=7 &&
+                   layer.id.compare(layer.id.size()-7,7,".000000")==0)
+                    sum+=int(restored_compositor.GetLayerInfo(layer.id).width);
+            return sum;
+        };
+        restored.RunEnterFrame(); // render only; no tick handler installed yet
+        Check(restorer_picture_width()==8 && restored.FindEmote("restored")->BaseFrame()==3,
+              "E17 restored selector chooses the wide synthetic face without an implicit first-frame advance");
+        Check(restored.DoString("assert(model:setVariable('wardrobe',1))","E17 alternate selector"),"change restored selector");
+        restored.RunEnterFrame();
+        Check(restorer_picture_width()==6,"E17 restored selector actually affects the rendered scene, not only its getter");
+        Check(restored.DoString(R"(
+            assert(model:setVariable('wardrobe',0.25))
+            e:setEventHandler{onEnterFrame='tick_emote'}
+        )","E17 script-owned frame driver"),"install one explicit frame driver after reconstruction");
+        restored.RunEnterFrame();
+        Check(restored.DoString(R"(
+            assert(load_calls==1 and frame_calls==1 and logical.elapsed==4 and logical.remaining==8)
+            assert(math.abs(model:getVariable('expression')-6)<1e-9)
+            assert(math.abs(model:getTimelineBlendRatio('safety_loop')-(0.625-0.375/9))<1e-9)
+            assert(model:countPlayingTimelines()==1 and model:isTimelinePlaying('safety_loop'))
+        )","E17 first driven frame"),"E17 first frame advances rearmed controls once, without duplicate playback/restoration");
+        Check(restored.FindEmote("restored")->BaseFrame()==4 && restorer_picture_width()==8,
+              "E17 first driven frame advances the clock once and keeps restored selector composition");
+    }
+    std::filesystem::remove_all(restorer_root); // only this freshly created test-owned root
+    Check(emote.DoString(R"(
+        local m=e:createEmoteLayer{id='blend_flags',files={'emote.psb'},progress=false}
+        assert(m and m:playTimeline('loop'))
+        assert(m:setTimelineBlendRatio('loop',0,0,0,0))
+        m:progress(0)
+        assert(m:isTimelinePlaying('loop'), 'numeric zero must not arm fade-out removal')
+        e:tag{'lydel',id='blend_flags'}
+    )","blend numeric zero"),"numeric zero blend flag retains zero-weight playback");
+    Check(emote.DoString(R"(
+        local m=e:createEmoteLayer{id='blend_errors',files={'emote.psb'},progress=false}
+        assert(m and m:playTimeline('loop'))
+        assert(m:setTimelineBlendRatio('loop',0.75,0,0,false))
+        for _,method in ipairs{m.setTimelineBlendRatio,m.SetTimelineBlendRatio} do
+            for _,args in ipairs{
+                {{},0,0,0,false},             -- label
+                {'loop',nil,0,0,false},        -- required ratio
+                {'loop',0,{},0,false},         -- optional frames
+                {'loop',0,0,{},false},         -- optional ease
+                {'loop',nil,{},{},false}       -- multiple old positional errors
+            } do
+                local old_ok,old_err=pcall(method,m,unpack(args,1,5))
+                assert(old_ok==false and type(old_err)=='string')
+                assert(old_err:find('expected',1,true))
+                for _,bad in ipairs{{},'0',0/0,math.huge} do
+                    args[5]=bad
+                    local ok,err=pcall(method,m,unpack(args,1,5))
+                    assert(ok==false, 'positional errors must throw before flags validation')
+                    assert(err==old_err, 'invalid flags must preserve the positional error')
+                    assert(m:getTimelineBlendRatio('loop')==0.75)
+                    m:progress(0)
+                    assert(m:isTimelinePlaying('loop'))
+                end
+            end
+        end
+        e:tag{'lydel',id='blend_errors'}
+    )","blend positional error precedence"),"blend positional errors retain pcall failure and error shape with invalid flags");
+    Check(emote.DoString(R"(
+        local m=e:createEmoteLayer{id='blend_flags',files={'emote.psb'},progress=false}
+        local function blend(flag, remove, frames)
+            assert(m:playTimeline('loop'))
+            assert(m:SetTimelineBlendRatio('loop',0,frames,0,flag))
+            if frames > 0 then
+                m:progress(frames/2)
+                assert(m:isTimelinePlaying('loop'))
+                assert(math.abs(m:getTimelineBlendRatio('loop')-0.5)<1e-9)
+                m:progress(frames/2)
+            else
+                m:progress(0)
+            end
+            assert(m:isTimelinePlaying('loop') == not remove)
+        end
+        for _,frames in ipairs{0,4} do
+            blend(0,false,frames)
+            blend(false,false,frames)
+            blend(1,true,frames)
+            blend(true,true,frames)
+            -- Existing C++ contract: any finite nonzero value, not bit0 only.
+            blend(2,true,frames)
+            blend(-2,true,frames)
+            blend(0.5,true,frames)
+        end
+        assert(m:playTimeline('loop'))
+        assert(m:setTimelineBlendRatio('loop',0))    -- omitted flags
+        m:progress(0)
+        assert(m:isTimelinePlaying('loop'))
+        assert(m:fadeOutTimeline('loop',4,0))
+        assert(m:setTimelineBlendRatio('loop',0,0,0,0)) -- cancel pending auto-stop
+        m:progress(4)
+        assert(m:isTimelinePlaying('loop'))
+        for _,bad in ipairs{'0','1','',{},function()end,0/0,math.huge,-math.huge} do
+            assert(m:setTimelineBlendRatio('loop',0.75,0,0,false))
+            local ok,err=m:setTimelineBlendRatio('loop',0,0,0,bad)
+            assert(ok==false and err:find('flags',1,true))
+            assert(m:getTimelineBlendRatio('loop')==0.75)
+            m:progress(0)
+            assert(m:isTimelinePlaying('loop'))
+        end
+        e:tag{'lydel',id='blend_flags'}
+    )","blend flags contract"),"blend flags numeric/boolean, immediate/timed, cancellation and invalid inputs");
+
+    // E3 normal-path evidence (docs/emote-driver-contract.md): bit0 controls
+    // stop-all, bit1 selects private noninstant tracks, never a timeline FIFO.
+    // These synthetic Lua checks do not establish native ABI/visual equivalence.
+    Check(emote.DoString(R"(
+        local m=e:createEmoteLayer{id='local_e3',files={'emote.psb'},progress=false}
+        for _,flags in ipairs{0,1,2,3} do
+            m:stopTimeline('')
+            assert(m:playTimeline('once',1) and m:playTimeline('loop',3))
+            assert(m:PlayTimeline('delta',flags))
+            local parallel=flags%2==1
+            assert(m:countPlayingTimelines()==(parallel and 3 or 1))
+            assert(m:isTimelinePlaying('once')==parallel and m:isTimelinePlaying('loop')==parallel)
+            assert(m:isTimelinePlaying('delta')) -- bit1 starts immediately, not after once
+            local index=parallel and 2 or 0
+            assert(m:getPlayingTimelineLabelAt(index)=='delta' and m:getPlayingTimelineFlagsAt(index)==flags)
+            assert(m:playTimeline('delta',flags))
+            assert(m:countPlayingTimelines()==(parallel and 3 or 1))
+            assert(m:getPlayingTimelineLabelAt(index)=='delta')
+        end
+        assert(m:playTimeline('once')) -- omitted flags are 0, not parallel
+        assert(m:countPlayingTimelines()==1 and m:getPlayingTimelineFlagsAt(0)==0)
+        assert(not m:isTimelinePlaying('loop') and not m:isTimelinePlaying('delta'))
+        assert(m:playTimeline('delta',2))
+        assert(m:countPlayingTimelines()==1 and not m:isTimelinePlaying('once'))
+        assert(m:setVariable('expression',7))
+        m:progress(5)
+        assert(m:getVariable('expression')==7) -- private diff never replaces base getter
+        local ok,err=m:playTimeline('missing',0)
+        assert(ok==false and err and m:isTimelinePlaying('delta'))
+        for _,bad in ipairs{0.5,0/0,math.huge,-math.huge,2147483648} do
+            ok,err=m:PlayTimeline('once',bad)
+            assert(ok==false and err and m:countPlayingTimelines()==1)
+            assert(m:getVariable('expression')==7 and m:getPlayingTimelineFlagsAt(0)==2)
+        end
+        assert(m:playTimeline('loop',1)) -- ordinary track commands base, irrespective of metadata.diff
+        m:progress(5)
+        assert(math.abs(m:getVariable('expression')-5)<1e-9)
+        m:stopTimeline('loop')
+        assert(m:isTimelinePlaying('delta') and m:countPlayingTimelines()==1)
+        m:StopTimeline('')
+        assert(not m:isTimelinePlaying('') and m:countPlayingTimelines()==0)
+        e:tag{'lydel',id='local_e3'}
+    )","E3 flags and private tracks"),"Lua flags0/2 stop-all, flags1/3 parallel, immediate private playback and atomic rejection");
+    Check(emote.DoString(R"(
+        e3=e:createEmoteLayer{id='e3_clock',files={'emote.psb'},progress=false}
+        local m=e3
+        assert(m:playTimeline('once',1) and m:playTimeline('delta',3))
+        m:progress(5)
+        m:setQueuing(true)
+        assert(m:setVariable('partner',10,60,0))
+        assert(m:setVariable('partner',70,60,0))
+        assert(m:setVariableDiff('expression','partner',6,60,0))
+        assert(m:setVariableDiff('expression','partner',-4,60,0))
+        assert(m:setTimelineBlendRatio('delta',0.5,60,0,0))
+        assert(m:setTimelineBlendRatio('delta',0.25,60,0,0))
+        m:Step()
+        assert(not m:isTimelinePlaying('once') and m:isTimelinePlaying('delta'))
+        assert(m:getVariable('expression')==60 and m:getVariable('partner')==70)
+        assert(m:getVariableDiff('expression','partner')==-4 and m:getTimelineBlendRatio('delta')==0.25)
+        m:step() -- repeat is not another Progress(1)
+        assert(m:playTimeline('once',1))
+        m:Skip()
+        assert(not m:isTimelinePlaying('once') and m:isTimelinePlaying('delta'))
+        assert(m:getVariable('expression')==60 and m:countPlayingTimelines()==1)
+    )","E3 Step and Skip"),"Step/Skip remove finite playback, retain loops and finish final queued global targets");
+    Check(emote.FindEmote("e3_clock")->BaseFrame()==5,
+          "Lua Step, repeated Step and Skip never advance the base/scene clock");
+    Check(emote.DoString(R"(
+        local m=e3
+        m:stopTimeline(''); m:setQueuing(false)
+        assert(m:setVariable('partner',0) and m:setVariableDiff('expression','partner',0))
+        assert(m:playTimeline('once',1) and m:playTimeline('delta',3))
+        m:progress(5)
+        assert(m:setVariable('partner',60,60,0))
+        assert(m:setVariableDiff('expression','partner',12,60,0))
+        assert(m:setTimelineBlendRatio('delta',0.25,60,0,0))
+        m:Pass()
+        assert(not m:isTimelinePlaying('once') and m:isTimelinePlaying('delta'))
+        assert(math.abs(m:getVariable('expression')-5)<1e-9)
+        assert(m:getVariable('partner')==0 and m:getVariableDiff('expression','partner')==0)
+        assert(m:getTimelineBlendRatio('delta')==1) -- loop and its pending blend untouched
+    )","E3 ordinary Pass"),"Pass removes ordinary nonloop but submits rather than finishes remaining commands");
+    Check(emote.FindEmote("e3_clock")->BaseFrame()==10,"ordinary Pass does not advance base frame");
+    const bool e3_private_pass=emote.DoString(R"(
+        local m=e3
+        m:progress(10)
+        assert(math.abs(m:getVariable('expression')-(5+55/6))<1e-9) -- Pass uses remaining record.time=60
+        assert(math.abs(m:getVariable('partner')-10)<1e-9)
+        assert(math.abs(m:getVariableDiff('expression','partner')-2)<1e-9)
+        assert(math.abs(m:getTimelineBlendRatio('delta')-0.875)<1e-9)
+        assert(m:playTimeline('once',3))
+        m:Pass()
+        assert(m:isTimelinePlaying('once') and m:getTimelineBlendRatio('once')==1)
+        m:progress(10)
+        assert(m:isTimelinePlaying('once') and math.abs(m:getTimelineBlendRatio('once')-0.5)<1e-9)
+        m:pass() -- repeat guard must not restart the 20-frame private fade
+        m:progress(9)
+        assert(m:isTimelinePlaying('once') and math.abs(m:getTimelineBlendRatio('once')-0.05)<1e-9)
+        m:progress(1)
+        assert(math.abs(m:getVariable('partner')-30)<1e-9)
+        assert(math.abs(m:getVariableDiff('expression','partner')-6)<1e-9)
+        assert(not m:isTimelinePlaying('once') and m:isTimelinePlaying('delta'),
+            'private fade must remove at 20 frames: playing='..tostring(m:isTimelinePlaying('once'))..
+            ' blend='..string.format('%.17g',m:getTimelineBlendRatio('once')))
+    )","E3 private Pass fade");
+    // Defer this result so a boundary failure still allows the E5/E2/bridge
+    // safety nets below to run; never relax the exact 20-frame removal contract.
+    Check(emote.DoString("e:tag{'lydel',id='e3_clock'}","E3 clock cleanup"),"remove E3 clock fixture");
+    Check(emote.DoString(R"(
+        local m=e:createEmoteLayer{id='e3_commands',files={'emote.psb'},progress=false}
+        assert(m:getQueuing()==false and m:GetQueuing()==false)
+        m:SetQueuing(true)
+        for _,method in ipairs{m.setQueuing,m.SetQueuing} do
+            for _,bad in ipairs{0,1,'true',{},function()end} do
+                local ok,err=method(m,bad)
+                assert(ok==false and err and m:getQueuing()==true)
+            end
+        end
+        assert(m:playTimeline('loop',3) and m:playTimeline('delta',3))
+        assert(m:countPlayingTimelines()==2) -- queuing=true still does not serialize timelines
+        m:stopTimeline('delta')
+        assert(m:setVariable('partner',10,12,0) and m:setVariable('partner',-2,12,0))
+        assert(m:setVariableDiff('expression','partner',8,12,0))
+        assert(m:setVariableDiff('expression','partner',-4,12,0))
+        assert(m:setTimelineBlendRatio('loop',0.5,12,0,0))
+        assert(m:setTimelineBlendRatio('loop',0.25,12,0,0))
+        m:Progress(18)
+        assert(math.abs(m:getVariable('partner')-4)<1e-9)
+        assert(math.abs(m:getVariableDiff('expression','partner')-2)<1e-9)
+        assert(math.abs(m:getTimelineBlendRatio('loop')-0.375)<1e-9)
+        m:Pass()
+        assert(math.abs(m:getVariable('partner')-4)<1e-9)
+        assert(math.abs(m:getVariableDiff('expression','partner')-2)<1e-9)
+        m:Step()
+        assert(m:getVariable('partner')==-2 and m:getVariableDiff('expression','partner')==-4)
+        assert(m:getTimelineBlendRatio('loop')==0.25)
+        m:stopTimeline('')
+        assert(m:setVariable('partner',10,12,0) and m:setVariable('partner',20,12,0))
+        assert(m:setVariable('partner',-3)) -- immediate command clears active and queued commands
+        m:Step(); assert(m:getVariable('partner')==-3 and not m:isAnimating())
+        assert(m:setVariable('partner',10,12,0) and m:setVariable('partner',20,12,0))
+        m:setQueuing(false)
+        assert(m:setVariable('partner',6,12,0))
+        m:progress(6)
+        assert(math.abs(m:getVariable('partner')-1.5)<1e-9)
+        m:Skip(); assert(m:getVariable('partner')==6 and not m:isAnimating())
+        e:tag{'lydel',id='e3_commands'}
+    )","E3 independent command queues"),"Lua Queuing aliases, validation, per-channel elapsed carry, final target and immediate/replacement clearing");
+
+    Check(emote.DoString(R"(
+        physics=e:createEmoteLayer{id='physics',files={'emote.psb'},progress=false}
+        physics:setCoord(12,34,0,90); physics:setScale(2,3,0,0)
+        physics:setHairScale(0.5); physics:setBustScale(0.75)
+        assert(physics:playTimeline('once'))
+        assert(physics:playTimeline('delta',3))
+        assert(physics:setVariable('partner',10,60,0))
+        assert(physics:setTimelineBlendRatio('once',0.25,60,0,0))
+    )","physics setup"),"physics validation fixture has active controls and concurrent private playback");
+    const double physics_frame = emote.FindEmote("physics")->BaseFrame();
+    std::vector<std::string> physics_logs;
+    artc::SetLogSink([&](int, const std::string& message) { physics_logs.push_back(message); });
+    const bool physics_valid = emote.DoString(R"(
+        local m=physics
+        local function unsupported(method,...)
+            local result={method(m,...)}
+            assert(#result==2 and result[1]==false)
+            assert(result[2]:find('unsupported E-mote physics:',1,true))
+        end
+        for i=1,3 do
+            for _,part in ipairs{'bust','hair','parts'} do
+                unsupported(m.setOuterForce,part,1,-2,0,0.5)
+                unsupported(m.SetOuterForce,part,1,-2,0,0.5)
+            end
+            unsupported(m.setOuterRot,1,-2,0.5)
+            unsupported(m.SetOuterRot,1,-2,0.5)
+        end
+    )","physics unsupported");
+    artc::SetLogSink({});
+    Check(physics_valid,"valid outer physics methods and aliases explicitly return false + unsupported reason");
+    Check(physics_logs.size()==2 &&
+          physics_logs[0]=="emote: unsupported E-mote physics: setOuterForce" &&
+          physics_logs[1]=="emote: unsupported E-mote physics: setOuterRot",
+          "valid unsupported physics logs once per canonical method, not once per call/part/alias");
+    Check(emote.DoString(R"(
+        local m=physics
+        local function invalid(method,...)
+            local result={method(m,...)}
+            assert(#result==2 and result[1]==false and type(result[2])=='string')
+            assert(not result[2]:find('unsupported',1,true))
+        end
+        for _,method in ipairs{m.setOuterForce,m.SetOuterForce} do
+            invalid(method); invalid(method,'bust',1,2,3)
+            invalid(method,'bust',1,2,3,4,5)
+            for _,part in ipairs{'','head','Bust','bust\0junk',1,true,{}} do
+                invalid(method,part,1,2,3,4)
+            end
+            invalid(method,nil,1,2,3,4)
+            for i=1,4 do
+                for _,bad in ipairs{'1',true,{},function()end,0/0,math.huge,-math.huge} do
+                    local args={1,2,3,4}; args[i]=bad
+                    invalid(method,'hair',unpack(args))
+                end
+                local args={1,2,3,4}; args[i]=nil
+                invalid(method,'parts',unpack(args,1,4))
+            end
+        end
+        for _,method in ipairs{m.setOuterRot,m.SetOuterRot} do
+            invalid(method); invalid(method,1,2); invalid(method,1,2,3,4)
+            for i=1,3 do
+                for _,bad in ipairs{'1',false,{},function()end,0/0,math.huge,-math.huge} do
+                    local args={1,2,3}; args[i]=bad
+                    invalid(method,unpack(args))
+                end
+                local args={1,2,3}; args[i]=nil
+                invalid(method,unpack(args,1,3))
+            end
+        end
+        local x,y=m:getCoord(); assert(x==12 and y==34 and m:getRot()==90)
+        local sx,sy=m:getScale(); assert(sx==2 and sy==3)
+        assert(m:getVariable('partner')==0 and m:getTimelineBlendRatio('once')==1)
+        assert(m:isTimelinePlaying('once') and m:isTimelinePlaying('delta'))
+        assert(m:countPlayingTimelines()==2 and m:getPlayingTimelineFlagsAt(1)==3 and m:getAnimating())
+    )","physics malformed calls"),"physics rejects arity, part, coercible strings, types and nonfinite values without mutation");
+    Check(emote.FindEmote("physics")->BaseFrame()==physics_frame &&
+          emote.FindEmote("physics")->HairScale()==0.5 && emote.FindEmote("physics")->BustScale()==0.75,
+          "outer physics leaves clock and stored physical scales unchanged");
+    physics_logs.clear();
+    artc::SetLogSink([&](int, const std::string& message) { physics_logs.push_back(message); });
+    const bool discovery = emote.DoString(R"(
+        for i=1,2 do
+            assert(select('#',physics:startWind())==0)
+            assert(select('#',physics:unknownE5Probe(1,{},'x'))==0)
+            -- E15 frozen: both names must remain discovery stubs, not a
+            -- registered SkipToSync implementation with invented semantics.
+            assert(select('#',physics:skipToSync())==0)
+            assert(select('#',physics:SkipToSync())==0)
+        end
+    )","unknown physics and frozen sync");
+    artc::SetLogSink({});
+    Check(discovery && physics_logs==std::vector<std::string>{
+              "UNIMPLEMENTED: emote:startWind", "UNIMPLEMENTED: emote:unknownE5Probe",
+              "UNIMPLEMENTED: emote:skipToSync", "UNIMPLEMENTED: emote:SkipToSync"},
+          "unknown methods and unknown-signature startWind preserve once-only discovery; E15 remains unregistered");
+    Check(emote.FindEmote("physics")->BaseFrame()==physics_frame,
+          "frozen Lua skipToSync stub does not move the base clock");
+    Check(emote.DoString(R"(
+        physics:progress(30)
+        assert(math.abs(physics:getVariable('partner')-5)<1e-9)
+        assert(math.abs(physics:getTimelineBlendRatio('once')-0.625)<1e-9)
+        physics:progress(30)
+        assert(not physics:isTimelinePlaying('once') and physics:isTimelinePlaying('delta'))
+        assert(physics:countPlayingTimelines()==1) -- finite end never releases/restarts a FIFO entry
+        e:tag{'lydel',id='physics'}
+        for _,method in ipairs{physics.setOuterForce,physics.SetOuterForce,
+                               physics.setOuterRot,physics.SetOuterRot,
+                               physics.setTimelineBlendRatio} do
+            -- No arguments: stale resolution must run before arity/type checks.
+            local ok,err=method(physics)
+            assert(ok==nil and err=='E-mote layer removed')
+        end
+    )","physics stale precedence"),"physics preserves pending controls/concurrent playback and resolves stale handles before validation");
+    Check(emote.DoString(R"(
+        local m=e:createEmoteLayer{id='pair_controls',files={'emote.psb'},progress=false}
+        assert(m)
+        assert(m:getVariableDiff('expression','partner')==0)
+        assert(m:GetVariableDiff('partner','expression')==0)
+        assert(m:getVariableDiff('missing','partner')==0)
+        assert(m:setVariable('expression',3) and m:SetVariable('partner',2))
+        assert(m:SetVariableDiff('expression','partner',8,60,1))
+        assert(m:GetVariableDiff('expression','partner')==0 and m:isAnimating())
+        m:Progress(30)
+        assert(math.abs(m:getVariableDiff('expression','partner')-2)<1e-10)
+        assert(m:getVariable('expression')==3 and m:GetVariable('partner')==2)
+        assert(m:setVariableDiff('partner','expression',-5))
+        assert(m:GetVariableDiff('partner','expression')==-5)
+        assert(m:getVariableDiff('expression','partner')==2)
+        assert(m:setVariableDiff('partner','partner',-1))
+        assert(m:getVariableDiff('partner','partner')==-1)
+        for _,bad in ipairs{0/0,math.huge,-math.huge} do
+            for _,args in ipairs{{bad,60,0},{7,bad,0},{7,60,bad}} do
+                local ok,err=m:setVariableDiff('expression','partner',unpack(args))
+                assert(ok==false and type(err)=='string')
+                assert(m:getVariableDiff('expression','partner')==2)
+            end
+            local ok,err=m:SetVariableDiff('expression','expression',bad,60,0)
+            assert(ok==false and err and m:GetVariableDiff('expression','expression')==0)
+        end
+        for _,args in ipairs{{'missing','partner'},{'expression','missing'}} do
+            local ok,err=m:setVariableDiff(args[1],args[2],1)
+            assert(ok==false and err)
+        end
+        m:progress(15)
+        assert(math.abs(m:getVariableDiff('expression','partner')-4.5)<1e-10)
+        assert(m:setVariableDiff('expression','partner',-3.5,60,-1))
+        m:progress(15)
+        assert(math.abs(m:GetVariableDiff('expression','partner')-0.5)<1e-10)
+        m:Pass()
+        assert(math.abs(m:getVariableDiff('expression','partner')-0.5)<1e-10 and m:getAnimating())
+        m:Step() -- only Step/Skip finish the global pair control, not Pass
+        assert(m:getVariableDiff('expression','partner')==-3.5 and not m:getAnimating())
+        assert(m:SetVariableDiff('expression','partner',6,60))
+        m:skip()
+        assert(m:GetVariableDiff('expression','partner')==6 and not m:isAnimating())
+        e:tag{'lydel',id='pair_controls'}
+        for _,method in ipairs{m.setVariableDiff,m.SetVariableDiff,m.getVariableDiff,m.GetVariableDiff} do
+            local ok,err=method(m) -- stale lookup precedes malformed arguments
+            assert(ok==nil and err=='E-mote layer removed')
+        end
+        local fresh=e:createEmoteLayer{id='pair_controls',files={'emote.psb'},progress=false}
+        assert(fresh:getVariableDiff('expression','partner')==0 and fresh:getVariable('partner')==0)
+        for _,method in ipairs{m.setVariableDiff,m.SetVariableDiff,m.getVariableDiff,m.GetVariableDiff} do
+            local ok,err=method(m) -- same id must never resurrect a removed instance
+            assert(ok==nil and err=='E-mote layer removed')
+        end
+        e:tag{'lydel',id='pair_controls'}
+    )","ordered pair lua"),"Lua ordered-pair aliases, frame/ease units, validation and stale lifetime");
     Check(emote.DoString(R"(
         local m=e:createEmoteLayer{id='m1',files={'emote.psb'},width=1280,height=720,progress=false}
         assert(m)
@@ -925,10 +1629,12 @@ int main(int argc, char** argv) {
         assert(m:playTimeline('once'))
         assert(m:isTimelinePlaying('once') and not m:isTimelinePlaying('delta'))
         assert(m:getTimelineTotalFrameCount('once')==60)
-        assert(m:PlayTimeline('delta',2))            -- sequential: queued behind "once"
-        assert(m:countPlayingTimelines()==1)
-        m:progress(1200)                             -- 72 frames: once ends, delta starts
-        assert(m:isTimelinePlaying('delta'))
+        assert(m:PlayTimeline('delta',2))            -- private diff, bit0 clear removes "once"
+        assert(m:countPlayingTimelines()==1 and not m:isTimelinePlaying('once'))
+        m:progress(12)                              -- Lua progress accepts 60fps frame counts
+        -- Stop-all removes playback, not an ordinary setter command already
+        -- submitted by once; delta's private track does not overwrite that base.
+        assert(m:isTimelinePlaying('delta') and math.abs(m:getVariable('expression')-12)<1e-9)
         assert(m:setVariable('expression',5) and m:getVariable('expression')==5)
         local ok,err=m:setVariable('missing',1);assert(ok==false and err)
         m:setScale(1.5,0,0)                          -- Artemis: (scale, origin_x, origin_y)
@@ -942,17 +1648,18 @@ int main(int argc, char** argv) {
         m:setHairScale(0.5)
         m:setBustScale(0.5)
         assert(m:setVariableDiff('expression','partner',4,0,0))
-        assert(m:getVariable('expression')==4 and m:getVariable('partner')==-4)
+        assert(m:getVariable('expression')==5 and m:getVariable('partner')==0)
+        assert(m:getVariableDiff('expression','partner')==4)
         local dok,derr=m:setVariableDiff('expression','missing',1,0,0);assert(dok==false and derr)
         -- frame units: 60 frames = 1 s; after 30 frames the transition is half done
         m:setVariable('expression',0,0,0)
         assert(m:setVariable('expression',10,60,0))
         m:progress(30)
-        assert(m:getVariable('expression')==5)
+        assert(math.abs(m:getVariable('expression')-5)<1e-9)
         assert(m:fadeInTimeline('delta',150,0))      -- fade frames + ease float
         assert(m:fadeOutTimeline('delta',150,0))
         assert(m:setTimelineBlendRatio('delta',0.5,100,0))
-        m:step()                                     -- one 60 fps frame
+        m:step()                                    -- cross loop/control boundary, not Progress(1)
         assert(e:getEmoteLayer{id='m1',next=true})   -- table form + next
         m:startWind(1,2,3)                           -- unregistered physics: stub, no error
         stale=m
@@ -1023,5 +1730,6 @@ int main(int argc, char** argv) {
         Check(parsed.lines[5].command == "\x01""TEXT",
               "text after a tag bracket stays scenario text");
     }
+    Check(e3_private_pass,"Pass private nonloop fades exactly 20 frames once, without finishing globals or loops");
     std::cout << "audio channels and wait regressions passed\n";
 }

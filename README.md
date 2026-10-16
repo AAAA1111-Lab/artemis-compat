@@ -27,7 +27,7 @@
 | **音频** | **stb_vorbis 分块流 + OpenSL ES 播放器**：BGM(循环)/SE/语音（`splay`/`seplay`/`voplay`）；`_a`→`_b` 曲目接续；逻辑声道 + 定时增益/声像与交叉淡化（`sfade`/`sxfade`/`sepan`…）；`[wait se=]`、`setonsoundfinish`；生命周期静音 |
 | **视频** | **FFmpeg（可选）**解复用/解码：全屏或指定图层、循环、等待与取消键 |
 | **存档** | Pluto 值图原生编解码；BOWS/1003 变量/图层日志与 BOWG 全局银行导入（经游戏 `onLoad` 恢复）；`save` 写独立 ARCV 兼容检查点（原子写入 + 校验）；场景 PNG 缩略图 |
-| **E-mote** | PSB/MDF、RL/raw/CI8/DXT1/DXT3/DXT5/BC7、16bit（RGBA4444/5551/5650）/A8L8/RGBX8、mip 链（仅 level 0）、win/common 共享图集裁切、有限场景求值与 GLES 绘制（win-split `src`/`icon` 内容、motion 级 parameterize、帧色/priority）、`EmotePlayer` 播放器（坐标/缩放/枢轴/旋转/颜色 tint/灰度/差分变量/眨眼/选择器/attrcomp/淡入淡出与 blend 过渡/逐帧 `step`/命中测试）+ `createEmoteLayer`/`getEmoteLayer`（复杂模型/stencil 合成/粒子/物理/加密 PSB 整包明确不支持） |
+| **E-mote** | PSB v2–v4（加密头、v2 指定 body 区间、宿主 seed）、MDF/zlib 与有限 `lzfs` LZ4 frame；RL/raw/CI8/DXT1/DXT3/DXT5/BC7、16bit（RGBA4444/5551/5650）/A8L8/RGBX8、mip 链（仅 level 0）、win/common 共享图集裁切；有限场景求值与 GLES 绘制（`src`/`icon`、motion 级 parameterize、帧色/priority、部分容器节点、stencil 标签与 stage alpha mask、有限网格形变）；`EmotePlayer` + Lua 代理支持变换/tint/灰度、变量、自动眨眼/选择器/attrcomp 移除、时间轴淡入淡出/blend 及几何命中。并非完整 SDK；具体证据、未知项与不实现边界见[能力说明](docs/emote-capability-evidence.md) |
 | **输入** | 归一化键事件（`isDown`/`isPush`/`isDecide`/边沿）、触摸/tap、slider 拖拽、事件过滤器 |
 | **JNI** | 六接口导出 + ANativeActivity + DebugBridge.nativeInstall 引导 |
 | **日志** | `OutputLog(level,msg)` → `Artemis` tag / stderr；宿主 `SetLogSink` 次级输出钩子；tag[trace] 便于移植排障 |
@@ -121,7 +121,13 @@ com.ies_net.artemis.debug.DebugBridge.nativeInstall(
 
 ## 非目标 / 已知缺口
 
-- E-mote 完整 SDK 等价：网格/stencil 变形、复杂继承/深度/混合、物理与公开复杂模型仍不支持（加密头 PSB v2–v4、HOLD/插值、嵌套 motion 与 id 链变换继承已支持）
+- E-mote **非完整 SDK 等价**：有有限网格形变、部分模板/容器遍历与 stencil alpha mask 合成，但不保证任意模板实例化、所有 stencil 模式、复杂继承/深度/混合或独立阴影/光照模型；帧曲线 `zcc/ccc/cc` 仅接受、不应用，粒子/物理未实现。多文件 PSB 仍拒绝，ETC1/PVRTC 仍不支持
+- E-mote 加密仅覆盖上述 PSB/seed 路径，不保证任意整包结构过滤或 `EmoteFilterTexture` 纹理 callback 等价；`lzfs` 不支持字典、链接块及拼接帧。差分变量、flags/Pass/Step 的官方语义，复杂模型视觉、真实游戏命中与当前源码设备矩阵仍待验证；不能由已有合成测试或历史冒烟宣称 E2/E3/E7/E9/E14/E16 全部完成
+- E-mote 控制元数据已恢复多项官方 normal-path runtime 消费者，但**静态归属确认不等于项目实现**：transition/immediate/clamp/eyebrow/mouth/orbit/profile 及三个精确 face 默认名的项目支持与未知算法分开排期，不能由眨眼/选择器/attrcomp 三项代表齐全。`CalcLayerFrameInfo` 不向 Lua 暴露且 native 输出结构未知；`serialize/unserialize` 按需延期，自有 `onLoad` 不保证表情/timeline/blend 精确恢复，也不证明所有游戏均无需求。见[逐键证据与排期](docs/emote-capability-evidence.md)
+- E-mote 当前进度见[验收账本](docs/emote-plan.md)：普通 ordered pair/getter 已做，特殊 mirror 仅 parse；E3 flags/Step 等正重写；Z 通道去 label hacks、stage full-affine/shape leaf 已落地并获有限复审/定向证据。meshSync 已返修，combinator 数学 core/预算/standalone ASAN 通过，但 scene 缓存接入与 ancestor combine 未完成，仍非完整模型/官方兼容验收
+- 固定官方 Android 样本的 Lua 表不注册 skipToSync/contains/hitTest；项目统一stage的 contains/hitTest 是自有扩展。旧 SyncFrame/C++ SkipToSync 仅为 legacy extension，官方 native 使用 motion.tag sync 查询/lastTime fallback、独立eventwait，不能照搬三来源结束优先级；新 TagSync 查询包尚未完成，见[静态证据边界](docs/emote-capability-evidence.md)
+- E-mote 格式/行为证据见[格式证据](docs/emote-format-evidence.md)；mirror 官方为 metadata XOR 用户状态，本项目 `setMirror` 是扩展且尚未对齐；E10 的 transition/immediate/profile/orbit core 已有独立单元与测试，但**未接入模型/播放器，不能称运行时已支持**。当前 `build-test` 25/25 为本机合成回归，不代表游戏、设备或官方一致；真实游戏视觉、Android 宿主合同与 0138 官方对照仍未做
+- 基础 23/23、工具 16 selftests 与各项定向/静态 review 是不同测试时点，不是末次并行代码的全构建。E14 标题1200帧 exit0 有 private capture 但无立绘；newgame2600 因取名 modal 超时，仍未通过流畅游戏/完整矩阵验收
 - 原版任意 VM 状态快照、BOWS/BOWG **双向**写出、内嵌截图导入（自身 ARCV 检查点已可重启回读）
 - HLSL 仅覆盖已验证游戏用到的 Artemis 运行时子集（register sampler、`ps()`、`tex2D`、常用内建），非通用 D3D HLSL 编译器
 - 混合字体/嵌套样式、竖排、复杂 ruby 分配与完整字形塑形

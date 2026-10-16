@@ -1,4 +1,6 @@
 #include "pack/psb.h"
+#include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <limits>
@@ -38,65 +40,120 @@ struct PsbCipher {
         }
     }
 };
-// LZ4 block (RFC 1951-style sequences): literals + 2-byte match offset.
-bool InflateLz4Block(const uint8_t* src,size_t n,std::vector<uint8_t>& out) {
-    size_t i=0;
+uint32_t Little32(const uint8_t* p) {
+    return uint32_t(p[0])|(uint32_t(p[1])<<8)|(uint32_t(p[2])<<16)|(uint32_t(p[3])<<24);
+}
+// Local implementation of the XXH32 algorithm, seed zero only, written from
+// the published specification (v0.2.0), not third-party implementation code:
+// https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md
+// LZ4 stores these digests little endian (unlike XXH32's canonical encoding).
+uint32_t Lz4Hash(const uint8_t* data,size_t size) {
+    constexpr uint32_t prime1=0x9E3779B1u,prime2=0x85EBCA77u,prime3=0xC2B2AE3Du,
+                       prime4=0x27D4EB2Fu,prime5=0x165667B1u;
+    auto rol=[](uint32_t v,unsigned bits){return (v<<bits)|(v>>(32-bits));};
+    uint32_t hash=prime5;size_t p=0;
+    if(size>=16) {
+        uint32_t a=prime1+prime2,b=prime2,c=0,d=0u-prime1;
+        auto lane=[&](uint32_t& value) {
+            value=rol(value+Little32(data+p)*prime2,13)*prime1;p+=4;
+        };
+        do {lane(a);lane(b);lane(c);lane(d);} while(size-p>=16);
+        hash=rol(a,1)+rol(b,7)+rol(c,12)+rol(d,18);
+    }
+    hash+=uint32_t(size);
+    while(size-p>=4){hash=rol(hash+Little32(data+p)*prime3,17)*prime4;p+=4;}
+    while(p<size)hash=rol(hash+uint32_t(data[p++])*prime5,11)*prime1;
+    hash=(hash^(hash>>15))*prime2;
+    hash=(hash^(hash>>13))*prime3;
+    return hash^(hash>>16);
+}
+// LZ4 sequences: literals followed by an optional 16-bit match offset. Each
+// independent frame block starts its own history and has a bounded output.
+bool InflateLz4Block(const uint8_t* src,size_t n,size_t limit,std::vector<uint8_t>& out) {
+    const size_t start=out.size();size_t i=0,last_match=0;bool matched=false;
+    auto extended=[&](size_t& length) {
+        uint8_t add;
+        do {
+            if(i==n)return false;add=src[i++];
+            if(length>limit || add>limit-length)return false;
+            length+=add;
+        } while(add==255);
+        return true;
+    };
     while(i<n) {
         const uint8_t token=src[i++];
         size_t literals=token>>4;
-        if(literals==15) {
-            uint8_t add=0;
-            do { if(i>=n)return false; add=src[i++]; literals+=add; } while(add==255);
-        }
-        if(literals>n-i || out.size()+literals>MaxBytes)return false;
+        if(literals==15 && !extended(literals))return false;
+        if(literals>n-i || literals>limit-(out.size()-start))return false;
         out.insert(out.end(),src+i,src+i+literals);i+=literals;
-        if(i==n)break;  // last sequence carries literals only
-        if(i+2>n)return false;
-        const size_t offset=size_t(src[i])|(size_t(src[i+1])<<8);i+=2;
-        if(offset==0 || offset>out.size())return false;
-        size_t length=size_t(token&0x0f);
-        if(length==15) {
-            uint8_t add=0;
-            do { if(i>=n)return false; add=src[i++]; length+=add; } while(add==255);
+        if(i==n) {
+            // Block-format termination rules: literal-only final sequence,
+            // five final literals and last match >=12 decoded bytes from end.
+            return !matched || (literals>=5 && out.size()-start-last_match>=12);
         }
-        length+=4;
-        if(out.size()+length>MaxBytes)return false;
+        if(n-i<2)return false;
+        const size_t offset=size_t(src[i])|(size_t(src[i+1])<<8);i+=2;
+        if(offset==0 || offset>out.size()-start)return false;
+        size_t length=size_t(token&0x0f)+4;
+        if(length==19 && !extended(length))return false;
+        if(length>limit-(out.size()-start))return false;
+        matched=true;last_match=out.size()-start;
         for(size_t k=0;k<length;++k)out.push_back(out[out.size()-offset]);
     }
-    return true;
+    return false; // a compressed block must end in a literal-only sequence
 }
-// Minimal LZ4 frame reader for the "lzfs" PSB container. Independent blocks
-// only (linked blocks need a 64 KiB window and do not appear in PSB exports);
-// header/block/content checksums are skipped, the payload is what matters.
-bool InflateLz4Frame(const uint8_t* data,size_t size,std::vector<uint8_t>& out) {
-    if(size<7)return false;
-    if(!(data[0]==0x04 && data[1]==0x22 && data[2]==0x4D && data[3]==0x18))return false;
-    const uint8_t flg=data[4];
-    if((flg>>6)!=1)return false;              // version 01
-    if(!(flg&0x20))return false;              // independent blocks required
-    size_t p=6;                                // magic + FLG + BD
-    if(flg&0x08)p+=8;                          // content size
-    if(flg&0x01)p+=4;                          // dictionary id
-    p+=1;                                      // header checksum
-    if(p>size)return false;
-    const bool block_checksum=(flg&0x10)!=0;
+// Single-frame "lzfs" container, implemented from LZ4 frame specification
+// v1.6.4: https://github.com/lz4/lz4/blob/dev/doc/lz4_Frame_format.md
+// No dictionary contract or linked-block history is provided by this API.
+void InflateLz4Frame(const uint8_t* data,size_t size,std::vector<uint8_t>& out) {
+    auto fail=[](const char* why){throw std::runtime_error(why);};
+    if(size<7)fail("invalid lzfs: truncated frame header");
+    const uint8_t flg=data[4],bd=data[5];
+    if((flg>>6)!=1)fail("unsupported lzfs frame version");
+    if(flg&2)fail("invalid lzfs frame descriptor: reserved flag");
+    if(!(flg&0x20))fail("unsupported lzfs linked blocks");
+    if(flg&1)fail("unsupported lzfs dictionary");
+    const unsigned block_code=(bd>>4)&7;
+    if((bd&0x8f) || block_code<4)fail("invalid lzfs block descriptor");
+    const size_t block_max=size_t(1)<<(16+2*(block_code-4));
+    size_t p=6;uint64_t content_size=0;
+    if(flg&8) {
+        if(size-p<8)fail("invalid lzfs: truncated content size");
+        for(unsigned i=0;i<8;++i)content_size|=uint64_t(data[p++])<<(8*i);
+        if(content_size>MaxBytes)fail("invalid lzfs content size: output limit exceeded");
+    }
+    if(p==size)fail("invalid lzfs: truncated header checksum");
+    if(data[p]!=uint8_t(Lz4Hash(data+4,p-4)>>8))fail("invalid lzfs header checksum");
+    ++p;
     while(true) {
-        if(p+4>size)return false;
-        const uint32_t block=uint32_t(data[p])|(uint32_t(data[p+1])<<8)|
-                             (uint32_t(data[p+2])<<16)|(uint32_t(data[p+3])<<24);
+        if(size-p<4)fail("invalid lzfs: truncated block size");
+        const uint32_t block=Little32(data+p);
         p+=4;
         if(block==0)break;                     // end mark
         const size_t length=block&0x7FFFFFFFu;
-        if(length>size-p)return false;
+        if(length>block_max)fail("invalid lzfs block: encoded size exceeds descriptor");
+        if(length>size-p)fail("invalid lzfs: truncated block data");
+        const uint8_t* src=data+p;p+=length;
+        if(flg&0x10) {
+            if(size-p<4)fail("invalid lzfs: truncated block checksum");
+            if(Little32(data+p)!=Lz4Hash(src,length))fail("invalid lzfs block checksum");
+            p+=4;
+        }
+        size_t limit=std::min(block_max,MaxBytes-out.size());
+        if(flg&8)limit=std::min(limit,size_t(content_size)-out.size());
         if(block&0x80000000u) {                // stored block
-            if(out.size()+length>MaxBytes)return false;
-            out.insert(out.end(),data+p,data+p+length);
-        } else if(!InflateLz4Block(data+p,length,out)) return false;
-        p+=length;
-        if(block_checksum)p+=4;
-        if(p>size)return false;
+            if(length>limit)fail("invalid lzfs block/content size: output limit exceeded");
+            out.insert(out.end(),src,src+length);
+        } else if(!InflateLz4Block(src,length,limit,out))
+            fail("invalid lzfs block/content size: malformed or oversized block");
     }
-    return true;
+    if((flg&8) && out.size()!=content_size)fail("invalid lzfs content size mismatch");
+    if(flg&4) {
+        if(size-p<4)fail("invalid lzfs: truncated content checksum");
+        if(Little32(data+p)!=Lz4Hash(out.data(),out.size()))fail("invalid lzfs content checksum");
+        p+=4;
+    }
+    if(p!=size)fail("unsupported lzfs trailing data or concatenated frames");
 }
 struct Reader {
     PsbDocument doc;
@@ -112,7 +169,8 @@ struct Reader {
         if(base>doc.bytes.size() || delta>=doc.bytes.size()-base)Fail("PSB offset outside file");
         return base+size_t(delta);
     }
-    void Count(size_t n) {if(n>MaxItems-items)Fail("PSB object limit exceeded");items+=n;}
+    // Validate the on-disk 64-bit count before narrowing on 32-bit hosts.
+    void Count(uint64_t n) {if(n>MaxItems-items)Fail("PSB object limit exceeded");items+=size_t(n);}
     std::vector<uint64_t> Array(size_t& p) {
         unsigned width=unsigned(Int(p,1));
         // count-width marker: 0x0D..0x14 (ArrayN1..ArrayN8), width = marker-0x0C
@@ -210,8 +268,8 @@ struct Reader {
         if(doc.bytes.size()<header_len)Fail("truncated PSB header");
         if(encryption_flags&1) {
             // Try seeds against a copy of the header; commit only when the
-            // decrypted header passes its adler32 checksum (a definitive check,
-            // so a wrong seed cannot slip through; v2 has no checksum). Seed
+            // decrypted header passes its adler32 corruption check (not an
+            // authentication guarantee; v2 has no checksum). Seed
             // precedence: host hook > ARTC_EMOTE_SEED > derived from the
             // canonical header length (the encrypted word at offset 8 must
             // decode to the plain header length).
@@ -240,8 +298,12 @@ struct Reader {
             if(g_psb_decrypt_seed) decrypted=try_seed(g_psb_decrypt_seed);
             if(!decrypted) {
                 if(const char* e=std::getenv("ARTC_EMOTE_SEED")) {
-                    char* end=nullptr;const unsigned long v=std::strtoul(e,&end,0);
-                    if(end && *end=='\0' && v) decrypted=try_seed(uint32_t(v));
+                    // Keep base-0 diagnostic syntax, but do not accept signs,
+                    // whitespace, overflow, or silent uint32_t truncation.
+                    char* end=nullptr;errno=0;
+                    const unsigned long v=std::strtoul(e,&end,0);
+                    if(*e>='0' && *e<='9' && end!=e && *end=='\0' && errno!=ERANGE &&
+                       v && v<=std::numeric_limits<uint32_t>::max())decrypted=try_seed(uint32_t(v));
                 }
             }
             if(!decrypted) {
@@ -274,11 +336,19 @@ struct Reader {
         }
         const uint32_t header_length=Header(8);
         if(header_length!=0 && header_length!=header_len)Fail("unexpected PSB header length");
-        Names(Header(12));p=Header(16);const auto offsets=Array(p);const auto base=Header(20);
-        for(auto o:offsets)strings.push_back(Text(Offset(base,o)));
-        Chunks(Header(24),Header(28),Header(32),doc.resources);
-        if(doc.version==4)Chunks(Header(44),Header(48),Header(52),doc.extra_resources);
-        doc.root=Value(Header(36));
+        try {
+            Names(Header(12));p=Header(16);const auto offsets=Array(p);const auto base=Header(20);
+            for(auto o:offsets)strings.push_back(Text(Offset(base,o)));
+            Chunks(Header(24),Header(28),Header(32),doc.resources);
+            if(doc.version==4)Chunks(Header(44),Header(48),Header(52),doc.extra_resources);
+            doc.root=Value(Header(36));
+        } catch(const std::runtime_error& e) {
+            if(!(encryption_flags&1))throw;
+            // v2 has no checksum; a bad seed and malformed body cannot be
+            // distinguished. Never report either as an authenticated failure.
+            throw std::runtime_error(std::string(doc.version==2?
+                "encrypted PSB: body decrypt/parse failed: ":"encrypted PSB: body parse failed: ")+e.what());
+        }
     }
 };
 }
@@ -288,8 +358,7 @@ bool DecodePsb(const std::vector<uint8_t>& input,PsbDocument& out,std::string& e
         Reader r;
         if(input.size()>=4 && input[0]==0x04 && input[1]==0x22 && input[2]==0x4D && input[3]==0x18) {
             // "lzfs" LZ4 frame container (KiriKiri exports, lzfs.dll).
-            if(!InflateLz4Frame(input.data(),input.size(),r.doc.bytes))
-                throw std::runtime_error("invalid lzfs LZ4 frame");
+            InflateLz4Frame(input.data(),input.size(),r.doc.bytes);
         } else if(input.size()>=8 && (input[0]|32)=='m' && (input[1]|32)=='d' && (input[2]|32)=='f' && !input[3]) {
             uint32_t size=0;for(int i=0;i<4;++i)size|=uint32_t(input[4+i])<<(8*i);
             if(!size || size>MaxBytes)throw std::runtime_error("invalid MDF size");

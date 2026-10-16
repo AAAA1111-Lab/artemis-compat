@@ -1,5 +1,55 @@
 # E-mote 详细实施计划（参考实现对照落地）
 
+## 全计划执行 / 验收账本（2026-10-16，最新汇总）
+
+执行目标仍覆盖 **E1–E17**。完整逐 E 的 `implemented / synthetic / real /
+staticdecision / missing` 账本与测试时点见[主计划顶部](emote-plan.md#execution-ledger)。
+本节只勾选限定代码/决策子项，**不勾选需要官方测试的验收**。下文原设计、历史记录、
+DoD 与各 WP 验收均保留，不因本次汇总删约束；历史“已落地”也不意味着整项完成。
+
+- [x] E1 `staticdecision/synthetic`：120 配对行、240 DWORD 独立校验通过；完整 ABI 未知。
+- [ ] E2 `implemented/staticdecision/missing`：普通 ordered pair/getter 已做；特殊 mirror 只 parse 名单，最终混合/真实模型仍需验证。
+- [ ] E3/WP0 `implemented/staticdecision/missing`：已证 bit1 非 sequential、Step 不调用 Progress，implementation 正重写；numeric0/错误优先级局部修复不代表整体通过。
+- [x] E4 `implemented/synthetic`：分数灰度与历史 CGL 像素证据已记录；最新构建/设备观感另验。
+- [x] E5 `implemented/synthetic/staticdecision`：A 分支专用 unsupported 已实现，runtime 定向独立通过；不是物理模拟。
+- [ ] E6/WP6 `implemented/synthetic/staticdecision/missing`：LZ4 校验加固及静态 review 通过，真实 v2 body 样本与最后全构建缺。
+- [ ] E7 `staticdecision/missing`：单文件限制保留，拆分样本、合并规则与原子失败/一致渲染未闭环。
+- [ ] E8/WP7 `implemented/synthetic/missing`：桌面格式/图集已做；移动格式无样本，色序/alpha 官方对照仍需。
+- [ ] E9/WP5/WP10 `implemented/synthetic/real/missing`：Z 去 label hacks 已落地/有限静态 review，meshSync red13→green/无 frame suspend；combinator core/预算/standalone ASAN 过，scene 缓存接入中、ancestor combine 研究中，不结项。
+- [ ] E10/WP1–WP3 `implemented/synthetic/staticdecision/missing`：多 blink 独立复审暂无 blocking；normal consumers 已确认运行时归属，项目支持另列并排期，未知算法不能消项。
+- [x] E11/WP4 `implemented/synthetic`：tint/metadata.mirror 与历史像素断言已记录；不是 mirrorControl/官方整体兼容证明。
+- [x] E12 `staticdecision`：不暴露 Lua；native 输出结构/ABI 未恢复，保留未知。
+- [x] E13 `staticdecision`：可选项本轮不启动，Windows 参照缺；没有真实轨迹 diff 通过。
+- [ ] E14 `implemented/synthetic/real/missing`：工具 save-dir/frames/timeout/completion + 16 selftests 已完成；主 agent host 1200 帧标题/exit0 无立绘，newgame 2600 因取名 modal 超时，非流畅游戏通过。
+- [ ] E15/WP8 `implemented/synthetic/staticdecision/missing`：23/23是旧legacy扩展测试；官方tag sync/last fallback、独立eventwait已静态确认，Lua不注册有正面依据；TagSync只读查询包仅派发。
+- [ ] E16/WP9 `implemented/synthetic/missing`：几何/triangle 与 stage full-affine/shape leaf 已落地、静态 review/合成定向通过；最后全构建/GL、官方点击/遮挡未验收。
+- [x] E17/WP11 `staticdecision`：按需延期决策；不是证明所有游戏不需要，表情/表达变量、timeline、blend 恢复仍缺证据。
+- [ ] 最后并行修改稳定后重跑原 DoD/主 §E14（test、真实 GL、mac、Android、消费者/JNI）；不复用旧 22/22、CGL 24/24 等记录。
+- [ ] 补原 E14 全矩阵、官方完整状态 A/B 与 0138；phone 当前非 game 待用户准备，但继续推进独立项，不将整个目标标 blocked。
+
+**测试时点**：23/23 是新 sync 注册后的基础独立结果；多 blink/triangle/numeric0/
+coordZ/combine 等末次变更的完整构建尚未在本账本确证。E5 定向、工具 16 selftests、
+E1 字节校验和静态 review 是分别报告的结果，不合成为“全部通过”。本次文档代理只同步
+主 agent 交接，不运行游戏/设备/存档、不新增构建结果、不暂存提交。
+
+**当前补充**（并存于上文，不删原验收）：格式/行为证据见
+[emote-format-evidence.md](emote-format-evidence.md)（Z 取累计 `coord[2]`、rawMeshList
+128 字节/mesh 首条绝对后续 delta、`neutralIndex=-1` 仅作标志、combinator 优先于 frame
+`bp` 且全 neutral 不回退、低位 sync 与 shape 位区分）；屏障 anchor 补偿未完成。
+WP1–WP3 相关：mirror 有效值 = metadata XOR 用户状态，`Mirror` getter 返回用户状态，
+匹配为大小写敏感字节子串、空项匹配全部，官方样本无 Lua `setMirror`，项目 `setMirror`
+为扩展且现为覆盖语义，未对齐。orbit：首次 Progress 不消费 dt，整周期回同 index 不重发，
+tween duration=`(index+1)*(T/N)-phase`。E10 core（transition/immediate/profile/orbit）
+已有 `emote_control.*` 与测试，**未接入 model/player，不能称运行时支持**。当前 `build-test`
+25/25 为本机合成回归，不代表游戏/设备/官方一致；真实游戏视觉、Android 宿主合同、
+0138 官方对照仍未做。
+
+**继续顺序**：先推进 E2 特殊 mirror、E3 重写、E9 scene 缓存/ancestor combine、
+E10 按前置证据实现、E15 TagSync 只读查询核验及 E16 扩展/native边界复核，
+再按最后源码重建/复审；受控独立 savedir host 跨过取名 modal 后补立绘及原 E14 矩阵。
+随后用户准备官方完整状态做精确 A/B；E6/E7/E8 样本、E15 tag sync/eventwait及 E17 恢复/需求门槛
+继续保留。HIDE 已修为精确 part，probe 已明确候选信息，仍不能作最终像素归属。
+
 > **定位**：`docs/emote-plan.md`（主计划，E1–E17）的执行细化。本文覆盖
 > 「可落到代码与夹具」的工作包（WP0–WP11），每项包含：目标、现状证据、
 > 设计、改动文件、实施步骤、回归夹具、验收标准、风险。
@@ -31,7 +81,11 @@
 映射：WP0 → E3/E10；WP1/WP2/WP3 → E10；WP4 → E11；WP5/WP10 → E9；WP6 → E6；
 WP7 → E8；WP8 → E15；WP9 → E16；WP11 → E17。
 
-## 进度
+## 历史进度快照（当前状态以顶部账本为准）
+
+> 原进度表保留历史事实；“E5/E12/E13/E17 决策完成”只说明所述决策，不能代替
+> 动态验收或证明所有游戏无需求。WP9/E1/WP6 等“已落地/完成”仅限当时子集，
+> E9 的新 Z/combine、E16 一般 affine/shapeholder 与最新全构建不得据此勾选。
 
 | WP | 状态 | 备注 |
 |---|---|---|
@@ -46,17 +100,22 @@ WP7 → E8；WP8 → E15；WP9 → E16；WP11 → E17。
 | WP5 曲线/帧色 | **帧色已落地**：`color`（MODULATE2X，2× 折算后与播放器 tint 相乘）；曲线字段仍只接受不应用（真实模型无 `zcc/ccc/cc` 命中） | |
 | WP8 sync/skipToSync | **部分**：推导 + C++ SkipToSync + 回归；Lua 注册待真机证据 | |
 | WP9 命中测试 | **已落地** | shape/blank/clip 源、rect/circle/point/quad、contains/hitTest |
-| WP10 网格细分 | **部分**：细分比率接通网格输出（默认 1.0 不变）；priority 已落地（时间变序重排）；meshSync 无 bp/cc 载荷（结项：仅一次性日志） | |
+| WP10 网格细分 | **部分**：细分比率接通网格输出（默认 1.0 不变）；priority 已接到 Draw；meshSync 已实现有限形状作用域、待更充分回归，早期“无 bp/cc 载荷结项”已撤回；owner 层序返修及独立复审通过，P1 在限定合成/静态边界可关闭 | 见 WP10 当前修订及主计划 §E9 |
 | E1 契约文档 | **完成**：`docs/emote-driver-contract.md` | |
 | E5/E12/E13/E17 | **决策完成**（见主计划「落地状态」） | |
-| E14 真机冒烟 | **部分完成**：host 冒烟通过；macOS CGL GL 回归通过；TyranorNext 实机曾验证立绘渲染；本机 `artemis-mac --tap/--snapshot` 全流程验证存档/读档/脸部渲染正确 | |
+| E14 真机冒烟 | **部分完成（历史验证）**：host 冒烟、macOS CGL GL 回归及 TyranorNext 立绘验证曾通过；本机 `artemis-mac --tap/--snapshot` 曾记录存/读档及脸部改善，不能替代当前源码与官方精确 A/B 验收 | 本轮测试边界见主计划 §E9 |
 | 真实模型对齐（甜蜜女友3） | **已落地**：win-split 内容、motion 级 parameterize、stencil 子树、深度忽略、blank `w:h:ox:oy`、per-frame color、priority、`bm` 混合、盒中心原点、HOLD 子节点、stencil 蒙版合成；合成回归覆盖 | |
 | E8 桌面贴图格式 | **已落地**：DXT1/DXT3/16bit/A8L8/RGBX8 + mip 容错（合成回归） | |
-| 实机（TyranorNext） | **已落地**：`Animated::Finish` 归零修复、inheritMask 放宽、bm 混合、盒中心偏移、stencil 子树/HOLD 递归、stencil 蒙版合成、蒙版纹理独立化、蒙版解析 O(n) 性能修复；本机全流程复验通过 | |
+| 实机/本机历史修复 | **历史落地记录**：`Animated::Finish` 归零修复、inheritMask 放宽、bm 混合、盒中心偏移、stencil 子树/HOLD 递归；后续 stencil 蒙版合成、纹理独立化及解析 O(n) 修复有本机验证记录，不等于均已获设备复验或最新源码验收 | 本轮状态见主计划 §E9 |
 
 ---
 
 ## WP0 — Artemis Lua 契约对齐（P0，先于一切）
+
+**当前执行状态**：native bit1 非 sequential、Step 不调用 Progress 已证，implementation
+正重写；旧“保留项目队列”的决定不再作为最终契约。flags0 空串全清事实保留；numeric0/
+位置错误优先级已修是局部证据，不能替代重写后 flags/Pass/Step 回归/复审。下方历史
+现状/设计保留作追溯，官方映射与真机入口仍按 E3/E14 原验收，不据代码落地全勾。
 
 **目标**：把 Lua 代理的签名、单位与参数形式对齐真实 Artemis 游戏脚本与
 `art3m1s-core` 的引擎绑定；这是"实测游戏能正确显示"的前置条件。
@@ -144,6 +203,12 @@ WP7 → E8；WP8 → E15；WP9 → E16；WP11 → E17。
 
 ## WP1 — 自动眨眼（eyeControl）
 
+**最新执行补记**：多 blink 改为每个控制器独立消耗完整步长，跨相位不丢时间；
+实现与扩展测试独立复审暂无 blocking，尚待最后完整构建。当前随机为每 player LCG，
+不是下方早期设计的 mt19937。现实现 ComposeVariables 为基础变量/时间轴 → blink →
+selector；下方设计/风险对覆盖顺序曾不一致，保留作待核验约束，不能擅自声称官方优先级
+已证或删掉真机自然眨眼、对话推进不挂起、wait 不超时验收。
+
 **目标**：解析模型眨眼控制并自动播放，且**不影响动画结束判定**。
 
 ### 现状与证据
@@ -213,6 +278,29 @@ WP7 → E8；WP8 → E15；WP9 → E16；WP11 → E17。
   用户 `setVariable` 为最高优先（写在 `variables_` 层）。
 
 ---
+
+## E10 其余 runtime 控制项的实施排期
+
+normal-path 静态消费者确认与项目支持分开：`official-runtime-static-confirmed` 不代表
+`implemented` 或官方动态兼容。SO 样本身份/地址口径由 driver-contract 任务持久化；
+本任务不编辑它。逐键地址、行为边界及证据前置详见
+[能力证据表与排期](emote-capability-evidence.md#e10-明确排期与实现前置证据)。
+
+| 优先级 / 顺序 | 项目待实现项 | 实现前置证据与合成出口 |
+|---|---|---|
+| P1-A1 | transitionControl | enabled/label 单维过渡已证；补默认值、变量路由、时钟/ease 和覆盖顺序，端点/中点夹具先行 |
+| P1-A2 | immediateControl/type9、face_cheek/face_tears/face_eye_hi 默认协议 | 缺键 default、显式空不 default 已证；补直写/instant 集合消费与重复/禁用优先级，分别测缺/空/显式表；不得拿 instantVariableList 或任意 face_* 通配替代 |
+| P1-A3 | mouthControl/talkLabel | label→mouth int、talkLabel→talk float 由 SetVariable 驱动已证；补转换/范围/talk 混合/闭口及过渡，不直接接 audio |
+| P1-B1 | clampControl pair | type1 normal branch 圆投影已证，type0 未知；补 min/max 归一、退化范围/组合顺序，恢复 type0 或限定拒绝边界，不写成普通 scalar clamp |
+| P1-B2 | eyebrowControl | edge/node runtime 消费已证；完整算法/布局/插值/边界/覆盖顺序待恢复，先有采样反例再实现 |
+| P1-B3 | orbitControl | interval/tween/orbitFrameList 周期派生已证；补 segment/循环/单位/跨段大步长，tween 是当前 segment 剩余时间而非固定整段 |
+| P1-B4 | mirrorControl/variableMatchList 特殊分支 | 普通 ordered pair/getter 与 parse 名单已做；特殊 mirror 算法、最终混合、反序/共用 label/优先级还需证据与夹具 |
+| P2 | charaProfile runtime query | height/pixelMarker map 已证，不是每帧 render；先恢复查询 API、坐标/单位/返回生命周期及需求，再实现自有查询 |
+| P1 调查 / P3 按需 | 其他 face_*、bust/hair/parts | 不泛化精确默认名；未知字段逐项找消费者。物理保持 E5 A，转实现须独立公式/需求及真实逐帧证据 |
+
+以上排期满足“运行时项进入明确后续”的管理要求，**不满足动态兼容验收**。现有
+blink/selector/attrcomp 仍须最后完整构建及真机流程；原 DoD、主 E10 判定表/实现或排期
+要求、主 E14 矩阵与下方各 WP 验收不变。
 
 ## WP2 — 选择器（selectorControl）
 
@@ -384,6 +472,12 @@ WP7 → E8；WP8 → E15；WP9 → E16；WP11 → E17。
 
 ## WP6 — PSB 加固：seed 钩子 / v2 body / lzfs
 
+**最新执行补记**：seed、v2 body 与 LZ4 路径已有实现，新增 LZ4 checksum/长度/边界
+加固经静态 review 通过，最后全构建及真实 v2 body 模型仍缺。下方只解头部是立项快照；
+v2 无校验，不把坏 seed/坏 body 伪装成可可靠区分。driver-contract 已更正 FilterTexture
+callback 为纹理/mip pixel 缓冲，旧“固定 key 整包输出/强制解密”不得当作已证 API。
+原坏流合成回归、真实加密模型加载及 README 同步要求全部保留。
+
 **目标**：覆盖官方驱动的整包加密路径与 LZ4 容器（不含 `EmoteFilterTexture`
 固定 key 的"强制解密"入口，后者单独评估）。
 
@@ -467,6 +561,18 @@ WP7 → E8；WP8 → E15；WP9 → E16；WP11 → E17。
 
 ## WP8 — sync / skipToSync（验证优先）
 
+**当前静态事实与项目边界**：固定 Android SO `RegisterLua 0x5509b0` 在相关名字中
+只注册 isAnimating，没有 skipToSync/contains/hitTest；Lua 不注册是确认后的决策。
+native `MMotionPlayer::SkipToSync 0x6ab794` 非loop查询 motion.tag 的
+`type1/time>=current/content.sync`，未命中 fallback lastTime，不按递归非parameterize
+最大值，没有 selfSyncTime 字段。`IsSyncWaiting/Release 0x6abb24/0x6abb2c` 是独立
+eventwait，IsAnimating 仍看 controls/playing timelines。地址/样本 hash 引用见能力证据。
+
+旧 `SyncFrame/C++ SkipToSync` 与基础23/23仅为 project legacy extension 的合成验证。
+新 TagSync 只读model查询包已派发，尚未完成。下方两阶段旧设计与主原三来源条文保留，
+但照搬三来源优先级的前提已被官方新事实推翻，不再以“有等待需求即可注册Lua”执行；
+先按 native tag sync/eventwait 明确查询/状态边界，原真实流程不挂起/不提前要求保留。
+
 **目标**：先建立 sync 事实，再决定是否接入结束判定。
 
 ### 现状与证据
@@ -490,6 +596,10 @@ WP7 → E8；WP8 → E15；WP9 → E16；WP11 → E17。
 - 合成 motion 推导 sync 值断言（含子 motion 递归、parameterize 排除）。
 - 验收：第 1 步只要求数值正确；第 2 步需真机流程证据。
 
+> 新事实旁注：保留上方原验收及下方原风险，但阶段二“注册Lua/结束三来源”不是现在
+> 的执行许可。官方表不注册、tag查询与独立eventwait已证，需显式说明对旧参考方案的
+> 替代边界，不能以旧数值测试或 TagSync 派发声称 native兼容/动态游戏通过。
+
 ### 风险
 
 - 该语义来自 KiriKiri 侧插件，Artemis 引擎插件是否采用未证实；**不得**先改
@@ -498,6 +608,14 @@ WP7 → E8；WP8 → E15；WP9 → E16；WP11 → E17。
 ---
 
 ## WP9 — 命中测试：shape/blank 源
+
+**当前执行状态**：几何/triangle 返修与 stage full-affine/shape leaf 已落地，静态 review
+及合成定向通过。有限路径不等于全部仿射边界正确、mask 像素命中或官方坐标契约；
+最后完整构建/GL、原点/边/顶点/缩放旋转及真机点击对照继续保留，不关闭整项。
+
+固定 Android RegisterLua 不含 contains/hitTest，native `Contains 0x675d5c` 为shape
+type1/geometry查询。项目 contains/hitTest 统一stage是自有扩展；下方参考实现的两套
+坐标区别并未被证明是该官方Lua协议，不能宣称官方二者区别已实现。样本 hash 见能力证据。
 
 **目标**：Lua `contains(label?, x, y)` / `hitTest(label?, x, y)` 与官方一致。
 
@@ -548,7 +666,57 @@ WP7 → E8；WP8 → E15；WP9 → E16；WP11 → E17。
     `content` 数组给出 rank），不是静态列表；
   - `stencilType & 0x4` 才启用 `stencilCompositeMaskLayerList`；节点 `type==1`
     为 shape 判定层；`bm` 每帧混合模式（0=alpha/1=add/2,5=rev-sub/3=multiply/4=screen）。
-- 本项目：固定 8×8 warped grid；不解析 priority/细分/混合模式；`bm!=0` 直接拒绝。
+- 立项时本项目：固定 8×8 warped grid，不解析 priority/细分/混合模式，
+  `bm!=0` 直接拒绝。此为历史差距，当前已接通细分倍率、priority 与 `bm`，
+  不能再作为现状；剩余边界如下。
+
+### 当前修订与验收缺口（2026-10-16）
+
+> **当前时点更正**：本节以下保留早先 owner/mask 返修记录。Z 通道已落地并移除
+> label hacks，获有限静态 review；coordZ/icon metadata 全图吻合不是官方同状态验收。
+> meshSync red13→green 且无 frame suspend；meshCombinator 数学 core、总64 MiB/
+> 单8 MiB/4096条预算及 standalone ASAN 已过，scene 缓存接入中，ancestor combine
+> 仍研究，不把 core 测试当整场景支持。stage full-affine/shape leaf 定向见 WP9。
+> HIDE 已修精确 part，probe 已修为明确 production 顺序候选，仍不是最终像素归属；
+> 以下“未修复”只适用于当时。23/23 基础、16 工具 selftests 与 host 1200 标题观察
+> 见顶部，不是 Z/combine/一般 affine 等末次代码的整体验收。
+
+- **meshSync**：早期“真实模型无 bp/cc 载荷、仅一次性日志即可结项”已撤回；
+  后续发现帧级 4×4 Bezier 控制网格。当前按 `meshTransform` 与形状位建立
+  有限形变作用域，结合 extent/继承挂起生成子部件网格；不等于完整支持各
+  meshSync 通道、`cc` 或 meshCombine，仍需更充分回归（历史修订见主计划 §E9）。
+- **层序返修完成，独立 review 确认 P1 可关闭**（限定合成运行/静态审查边界）。旧 `emote_tree` pairwise
+  祖先排序在混合普通层时不满足严格弱序，全局 `paint` 可跨背景/效果组；
+  本轮已替换为 owner 局部 `effect-path → paint → postorder rank → id` 全序，
+  将 `priority` 接到 Draw 并新增合成回归。官方截图仍仅是局部视觉参考，完整
+  变量/姿势未同步，不足以确立通用层序规则，不宣称真实游戏或官方等价。
+- **owner 契约**：有效驻留且互不重叠；嵌套独立 owner 明确返回 `false`，不是支持。
+  整体 owner/祖先 rename 映射 owner 并保留 rank/hint，同 owner 内 rename 保留；
+  显式及 ordinary 附加成员跨 owner/移出时清除源 paint/rank/标记。冲突 rename
+  返回 `false`、原子拒绝；delete 后旧 ID 重用无 ghost。`HitLayer` / `HitLayers`
+  复用真实 Draw 候选顺序，仍为几何命中而非 mask 像素命中。
+- **诊断证据边界**：`ARTC_EMOTE_PIXEL` 仅采样原图候选，忽略真实排序、mesh、
+  mask、blend 等，不能证明最终像素归属；`ARTC_EMOTE_HIDE` 旧实现隐藏整个
+  节点树而非纯图标。0138 差异仅有文字线索，缺精确对照及持久证据，不能
+  断言官方被手/裙遮挡。probe/HIDE 限制本轮未修复。
+- **蒙版回归**：新增双 mask-key、GL 释放/重建、非对称及 intermediate 覆盖
+  已抓到 Y 翻转，修复为 `RenderStageMask` 的 `u_top_down=1`，mask 方向独立只读
+  审查通过。早期 CGL repeat 3 次及修复前 22/22 baseline 保留为历史阶段记录。
+- **效果状态**：最小修复显式回写 `grayscale=0`、normal 混合与白色 tint，
+  此前 9 项失败已消除；新增固定 ID/图层保留回归，effect-reset 独立 review 已通过。
+- **主 agent 独立返修后验证**：再次 `build-test` 重建 + ctest **22/22**；`build-cgl`
+  全构建 + ctest **24/24**（含视频与 compositor）；更早合并版本 CGL compositor
+  repeat **5 次**通过保留为阶段记录。
+  `build-mac` 的 `artemis-mac` 与 `build-android` 构建成功，Android 导出脚本
+  **12 入口**通过。末次 owner 尾项之后，主 agent 已独立重建 `build-consumer`，
+  ctest **1/1** 通过；重建 `build-consumer-android`，无 JNI consumer final shared link
+  成功，`git diff --check` 通过。Mac 不能运行 Android
+  交叉产物。已有 warning 非新增错误，详见主计划 §E9「本轮审查状态与验收边界」。
+- **边界与后续**：交付时索引状态以 `git status` 为准，暂存由主 agent 处理；
+  本轮不提交、不发布、不复制 plugin、不改 manifest，v29 未经本轮验证；无游戏/手机
+  运行，未触设备存档。仍需关注排序键构建祖先扫描性能、probe/HIDE 限制，并补受控
+  本机游戏视觉/快照、手机官方状态对照、0138 证据及 Android 宿主实际合同验证；
+  JNI 已知缺口见 `docs/embedding.md`，链接/导出通过不等于 JNI 行为兼容。
 
 ### 步骤
 
@@ -565,6 +733,11 @@ WP7 → E8；WP8 → E15；WP9 → E16；WP11 → E17。
 ---
 
 ## WP11 — serialize / 物理（按需）
+
+**当前决策分开记账**：E5 A 分支专用物理 unsupported 已实现，runtime 定向独立通过，
+不运行物理；E17 仅按需延期，不是所有游戏均无需求。自有存档/onLoad 重建链见
+[能力证据](emote-capability-evidence.md#4-e17按需求门槛暂缓序列化)，仍需表情/表达变量、
+timeline、blend/剩余过渡恢复及限定目标的官方一致或明确无需求依据。
 
 见主计划 E17（存档恢复）与 E5（物理，默认 A 显式不支持）。启动条件：
 实测游戏脚本确实调用对应的 Lua 方法/存档需要恢复立绘状态。

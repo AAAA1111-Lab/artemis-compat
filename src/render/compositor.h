@@ -16,6 +16,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <set>
 #include <utility>
@@ -55,6 +56,9 @@ struct Layer {
     float sx = 1.0f, sy = 1.0f; // xscale/yscale (lyprop percent / 100), pivot = anchor
     float rotate = 0;          // clockwise degrees in the y-down stage
     bool reverse_x = false, reverse_y = false;
+    // Opt-in local linear matrix; x/y remain the only stored translation.
+    bool affine = false;
+    float affine_a = 1, affine_b = 0, affine_c = 0, affine_d = 1;
     bool own_pos = false;      // lyprop set an explicit position on this layer
     // [lyprop draggable/dragarea] — the framework's slider pins are
     // draggable within a rect given as {left, top, right, bottom} offsets
@@ -103,8 +107,23 @@ public:
     uint32_t RenderStageMask(int key, const std::vector<std::string> &ids);
     // Attach (texture != 0) or clear (texture == 0) the stage mask of a layer.
     void SetLayerStageMask(const std::string &id, uint32_t texture);
-    // Draw-order hint (smaller = earlier/behind; 0 = default id order).
+    // Explicit same-Z owner-local extension (smaller = earlier/behind). Never
+    // changes ordinary order or crosses an owner/ancestor effect group.
     void SetLayerPaint(const std::string &id, int paint);
+    // Legacy diagnostic membership marker; ordering requires an explicit owner.
+    void SetLayerEmoteTree(const std::string &id, bool on);
+    // Register the E-mote scene's external ID, same-Z compatibility rank and
+    // sampled effective Z. Inside an effect boundary: Z, explicit paint, rank,
+    // deterministic ID. Postorder at equal Z is not fully officially confirmed.
+    // All descendants of owner (including ordinary attached layers) share one
+    // contiguous draw block. A negative rank uses the ID-based fallback.
+    // Returns false without mutation for absent/nonmember IDs or overlapping
+    // distinct owners or non-finite Z. Empty owner clears rank/paint/Z. Owners
+    // exist only while a valid registered layer resides in their subtree.
+    // Rename maps whole owners; moving part of one out clears its registration.
+    // A whole-owner rename conflicting with another owner fails atomically.
+    bool SetLayerEmoteOrder(const std::string& id, const std::string& owner, int order,
+                            double effective_z=0);
 
     // ---- text (M2.2 message layer pipeline) ----
     // Load a TTF/OTF from the pack chain (font/xxx.ttf in game data).
@@ -130,6 +149,15 @@ public:
     // Override a layer's geometry with a warped triangle list (x,y,u,v per
     // vertex, layer-local pixels). Empty restores the plain quad.
     void SetLayerMesh(const std::string& id, const std::vector<float>& vertices);
+    // X=a*x+c*y+tx, Y=b*x+d*y+ty. Finite singular matrices are valid.
+    // Absent IDs/invalid values return false without mutation. Anchors, content
+    // offsets and live ancestors still apply. Leaves legacy TRS channels intact.
+    bool SetLayerAffine(const std::string& id, float a, float b, float c, float d,
+                        float tx, float ty);
+    // Restore stored legacy TRS/reverse, retaining current x/y and anchor.
+    // Explicit rotate/scale/zoom/reverse property or tween writes also clear it;
+    // position/alpha/effect writes do not. No-op success does not bump revision.
+    bool ClearLayerAffine(const std::string& id);
 
     // GL draw (called from the render loop on the engine thread). Draws all
     // visible layers, then invokes the present callback ([flip] semantics).
@@ -244,6 +272,26 @@ public:
     }
 
 private:
+    friend struct CompositorOrderRegression;
+    struct DrawOrderPart {
+        double effective_z=0;
+        int paint=0, order=-1;
+        std::string_view id;
+    };
+    struct DrawOrderEntry {
+        std::string_view id;
+        std::string_view external;
+        bool overlay=false;
+        std::vector<DrawOrderPart> path;
+    };
+    struct DrawOrderScratch {
+        std::vector<DrawOrderEntry> entries;
+        std::vector<std::string_view> owners;
+    };
+    void BuildDrawList(std::vector<const Layer*>& sorted,
+                       DrawOrderScratch& scratch) const;
+    static bool DrawOrderLess(const DrawOrderEntry& a,const DrawOrderEntry& b);
+    DrawOrderScratch draw_order_scratch_;
     uint64_t revision_ = 0;
     struct GlProgram {
         uint32_t program = 0;

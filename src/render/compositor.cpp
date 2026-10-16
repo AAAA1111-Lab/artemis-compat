@@ -28,6 +28,14 @@
 #include "util/save_storage.h"
 
 namespace artc {
+namespace {
+bool InLayerTree(std::string_view root,std::string_view id) {
+    return id==root || (id.size()>root.size() && id.substr(0,root.size())==root && id[root.size()]=='.');
+}
+bool ValidEmoteRegistration(const Layer& l) {
+    return !l.effect.emote_owner.empty() && InLayerTree(l.effect.emote_owner,l.id);
+}
+}
 
 bool Compositor::LoadShader(const std::string& id,const std::string& file) {
     std::vector<uint8_t> bytes;
@@ -40,6 +48,86 @@ bool Compositor::LoadShader(const std::string& id,const std::string& file) {
     return ok;
 }
 
+bool Compositor::SetLayerEmoteOrder(const std::string& id,const std::string& owner,int order,double effective_z) {
+    if(!std::isfinite(effective_z) || (!owner.empty() && !InLayerTree(owner,id)))return false;
+    // Owners are disjoint ID subtrees. Reject, rather than silently comparing
+    // independent local ranks in a merged scene. Only resident, valid members
+    // establish a registration; no separate root survives deletion or rename.
+    if(!owner.empty())for(const auto& l:layers_) {
+        const auto& other=l.effect.emote_owner;
+        if(ValidEmoteRegistration(l) && other!=owner &&
+           (InLayerTree(other,owner) || InLayerTree(owner,other)))return false;
+    }
+    for(auto& l:layers_)if(l.id==id) {
+        if(owner.empty()){order=-1;effective_z=0;}
+        if(l.effect.emote_owner==owner && l.effect.emote_order==order &&
+            l.effect.emote_z==effective_z &&
+           (!owner.empty() || (!l.effect.emote_tree && l.effect.paint==0)))return true;
+        l.effect.emote_owner=owner;l.effect.emote_order=order;
+        l.effect.emote_z=effective_z;
+        l.effect.emote_tree=!owner.empty();
+        if(owner.empty())l.effect.paint=0;
+        ++revision_;return true;
+    }
+    return false;
+}
+
+bool Compositor::RenameLayer(const std::string& id,const std::string& to) {
+    if(id.empty() || to.empty() || id==to)return false;
+    bool any=false;
+    for(const auto& l:layers_)if(InLayerTree(id,l.id)){any=true;break;}
+    if(!any)return false;
+    auto mapped=[&](const std::string& name) {
+        return InLayerTree(id,name)?to+name.substr(id.size()):name;
+    };
+    auto owner_after=[&](const Layer& l) {
+        if(!ValidEmoteRegistration(l))return std::string();
+        const auto owner=mapped(l.effect.emote_owner);
+        return InLayerTree(owner,mapped(l.id))?owner:std::string();
+    };
+    // Preflight the complete move: relocating an owner into/over another owner
+    // would merge unrelated rank domains. Fail atomically, even if the new
+    // owner is equal to an existing one. Plain-layer rename semantics are kept.
+    for(size_t i=0;i<layers_.size();++i) {
+        const auto a=owner_after(layers_[i]);if(a.empty())continue;
+        for(size_t j=0;j<i;++j) {
+            if(layers_[i].effect.emote_owner==layers_[j].effect.emote_owner)continue;
+            const auto b=owner_after(layers_[j]);
+            if(!b.empty() && (InLayerTree(a,b) || InLayerTree(b,a)))return false;
+        }
+    }
+    // Snapshot effective domains before mutating IDs: ordinary attached layers
+    // belong by subtree too, even though they have no explicit registration.
+    std::vector<std::pair<std::string,std::string>> domains;
+    for(const auto& l:layers_)if(ValidEmoteRegistration(l))
+        domains.emplace_back(l.effect.emote_owner,owner_after(l));
+    auto effective_owner=[&](const std::string& name,bool after)->std::string_view {
+        for(const auto& domain:domains) {
+            const auto& root=after?domain.second:domain.first;
+            if(!root.empty() && InLayerTree(root,name))return root;
+        }
+        return {};
+    };
+    for(auto& l:layers_) {
+        if(!InLayerTree(id,l.id))continue;
+        const auto next_id=mapped(l.id);
+        const auto before=effective_owner(l.id,false),after=effective_owner(next_id,true);
+        const bool same_domain=before.empty()?after.empty():mapped(std::string(before))==after;
+        const auto owner=owner_after(l);
+        if(!l.effect.emote_owner.empty()) {
+            l.effect.emote_owner=owner;
+            if(owner.empty()) {
+                l.effect.emote_order=-1;l.effect.paint=0;l.effect.emote_tree=false;l.effect.emote_z=0;
+            }
+        }
+        if(!same_domain) {
+            l.effect.emote_order=-1;l.effect.paint=0;l.effect.emote_tree=false;l.effect.emote_z=0;
+        }
+        l.id=next_id;
+    }
+    for(auto& tw:tweens_)if(InLayerTree(id,tw.id))tw.id=mapped(tw.id);
+    ++revision_;return true;
+}
 
 // Artemis layer z is a two-level sort. The leading integer is the primary
 // layer ("600", "1", "-273"); within the same primary layer the SECOND id
@@ -56,20 +144,23 @@ bool Compositor::LoadShader(const std::string& id,const std::string& file) {
 //   * an id with NO leading number ("bg", "froid"...) sorts to the bottom
 //     (letter-only names are framework helper/background layers and must not
 //     cover the numeric layer-set UI and scene layers).
-int ZCmp(const std::string &a, const std::string &b) {
-    auto lead = [](const std::string &s, int *start) -> long long {
-        *start = 0;
+int ZCmp(std::string_view a, std::string_view b) {
+    auto lead = [](std::string_view s) -> long long {
         size_t i = 0;
         while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
         if (i == 0) return -1;                 // no leading number
         long long v = 0;
-        try { v = std::stoll(s.substr(0, i)); } catch (...) { v = 0; }
-        *start = static_cast<int>(i);
+        // Preserve the old stoll overflow fallback without constructing an
+        // owning substring (this function also runs in draw/hit comparators).
+        for(size_t n=0;n<i;++n) {
+            const int digit=s[n]-'0';
+            if(v>(std::numeric_limits<long long>::max()-digit)/10)return 0;
+            v=v*10+digit;
+        }
         return v;
     };
-    int sa = 0, sb = 0;
-    const long long pa = lead(a, &sa);
-    const long long pb = lead(b, &sb);
+    const long long pa = lead(a);
+    const long long pb = lead(b);
     if (pa == -1 && pb == -1) return a == b ? 0 : (a < b ? -1 : 1);
     if (pa != pb) return pa < pb ? -1 : 1;
     // same leading value: compare the whole strings lexicographically
@@ -95,19 +186,82 @@ int LayerZCmp(const Layer& a, const Layer& b) {
     return ZCmp(a.id, b.id);
 }
 
-// Full paint order: explicit paint hints (smaller = earlier/behind) come
-// before the id z order; layers without a hint (0) stay put relative to the
-// id order, negative hints draw behind and positive hints in front.
-bool DrawOrderLess(const Layer *a, const Layer *b) {
-    const int pa = a->effect.paint, pb = b->effect.paint;
-    if (pa != pb) {
-        if (pa == 0) return pb > 0;
-        if (pb == 0) return pa < 0;
-        return pa < pb;
+namespace {
+// Compare virtual ID tokens: a terminal art segment sorts after every child
+// token. This is one lexicographic key for ALL owner members, not a conditional
+// ancestor reversal (which can form cycles with ordinary attached layers).
+int EmoteIdCmp(std::string_view a,std::string_view b) {
+    while(!a.empty() && !b.empty()) {
+        const auto da=a.find('.'),db=b.find('.');
+        const auto ta=a.substr(0,da),tb=b.substr(0,db);
+        const bool art_a=da==a.npos && ta=="000000",art_b=db==b.npos && tb=="000000";
+        if(art_a!=art_b)return art_a?1:-1;
+        if(ta!=tb)return ta<tb?-1:1;
+        a=da==a.npos?std::string_view():a.substr(da+1);
+        b=db==b.npos?std::string_view():b.substr(db+1);
     }
-    const int c = LayerZCmp(*a, *b);
-    if (c != 0) return c < 0;   // ascending: lower z first
-    return SectionCount(a->id) < SectionCount(b->id);
+    return a.empty()?(b.empty()?0:-1):1;
+}
+}
+
+void Compositor::BuildDrawList(std::vector<const Layer*>& sorted,
+                               DrawOrderScratch& scratch) const {
+    // Reuse per-slot key storage. All text below is non-owning; sorting compares
+    // only immutable lexicographic keys and never constructs strings.
+    auto& entries=scratch.entries;auto& owners=scratch.owners;
+    owners.clear();
+    for(const auto& l:layers_)if(ValidEmoteRegistration(l))owners.push_back(l.effect.emote_owner);
+    std::sort(owners.begin(),owners.end());
+    owners.erase(std::unique(owners.begin(),owners.end()),owners.end());
+    if(entries.size()<layers_.size())entries.resize(layers_.size());
+    for(size_t i=0;i<layers_.size();++i) {
+        const auto& l=layers_[i];auto& e=entries[i];
+        e.id=l.id;e.external=l.id;e.overlay=l.message_overlay;e.path.clear();
+        std::string_view owner;
+        for(const auto root:owners)
+            if(InLayerTree(root,l.id) && (owner.empty() || root.size()<owner.size()))owner=root;
+        if(owner.empty())continue;
+        e.external=owner;
+        // The owner has one external overlay policy, even for mixed members.
+        e.overlay=false;
+        for(const auto& root:layers_)if(root.id==owner)e.overlay=root.message_overlay;
+        auto append=[&](const Layer& part) {
+            e.path.push_back({part.effect.emote_owner==owner?part.effect.emote_z:0,
+                part.effect.paint,part.effect.emote_owner==owner?part.effect.emote_order:-1,part.id});
+        };
+        // Effect boundaries are ordered outer-to-inner and cannot be crossed by
+        // effective Z, explicit paint or same-Z rank. A group's own entry is a
+        // prefix of its leaves; local Z never becomes a global layer-ID Z.
+        for(size_t dot=owner.size();dot<l.id.size();dot=l.id.find('.',dot+1)) {
+            if(dot==std::string::npos)break;
+            for(const auto& parent:layers_)
+                if(parent.id.size()==dot && l.id.compare(0,dot,parent.id)==0 && parent.effect.Active())append(parent);
+        }
+        if(l.id!=owner)append(l);
+    }
+    sorted.clear();sorted.reserve(layers_.size());
+    for(const auto& l:layers_)sorted.push_back(&l);
+    auto key=[&](const Layer* l)->const DrawOrderEntry& {return entries[size_t(l-layers_.data())];};
+    std::sort(sorted.begin(),sorted.end(),[&](const Layer* a,const Layer* b) {
+        return DrawOrderLess(key(a),key(b));
+    });
+}
+
+bool Compositor::DrawOrderLess(const DrawOrderEntry& a,const DrawOrderEntry& b) {
+    if(a.overlay!=b.overlay)return !a.overlay;
+    if(const int z=ZCmp(a.external,b.external))return z<0;
+    const size_t count=std::min(a.path.size(),b.path.size());
+    for(size_t i=0;i<count;++i) {
+        const auto& pa=a.path[i];const auto& pb=b.path[i];
+        if(pa.effective_z!=pb.effective_z)return pa.effective_z<pb.effective_z;
+        if(pa.paint!=pb.paint)return pa.paint<pb.paint;
+        const int ra=pa.order<0?std::numeric_limits<int>::max():pa.order;
+        const int rb=pb.order<0?std::numeric_limits<int>::max():pb.order;
+        if(ra!=rb)return ra<rb;
+        if(const int id=EmoteIdCmp(pa.id,pb.id))return id<0;
+    }
+    if(a.path.size()!=b.path.size())return a.path.size()<b.path.size();
+    return a.id<b.id;
 }
 
 void Compositor::EffectiveRect(const Layer &l, float *ex, float *ey,
@@ -138,7 +292,8 @@ Compositor::Transform Compositor::EffectiveTransform(const Layer& l) const {
         if (std::abs(si)<1e-7f) si=0;
         const float sx=n.sx*(n.reverse_x ? -1.f : 1.f);
         const float sy=n.sy*(n.reverse_y ? -1.f : 1.f);
-        const float a=co*sx, b=si*sx, c=-si*sy, d=co*sy;
+        const float a=n.affine?n.affine_a:co*sx, b=n.affine?n.affine_b:si*sx;
+        const float c=n.affine?n.affine_c:-si*sy, d=n.affine?n.affine_d:co*sy;
         const float tx=n.x+n.ax-a*n.ax-c*n.ay;
         const float ty=n.y+n.ay-b*n.ax-d*n.ay;
         const auto origin=m.Point(tx,ty);
@@ -224,19 +379,11 @@ bool Compositor::HomeLayerToTextPen(const std::string& text_id,
 }
 
 std::string Compositor::HitLayer(float x, float y) const {
-    const Layer *best = nullptr;
-    for (const auto &l : layers_) {
-        if (!ContainsPoint(l,x,y)) continue;
-        if (!best) best = &l;
-        else {
-            const int c = LayerZCmp(l, *best);
-            const bool lFront = c > 0 ||
-                                (c == 0 &&
-                                 SectionCount(l.id) > SectionCount(best->id));
-            if (lFront) best = &l;
-        }
-    }
-    return best ? best->id : std::string();
+    std::vector<const Layer*> sorted;DrawOrderScratch scratch;
+    BuildDrawList(sorted,scratch);
+    for(auto it=sorted.rbegin();it!=sorted.rend();++it)
+        if(ContainsPoint(**it,x,y))return (*it)->id;
+    return {};
 }
 
 // [var system="get_layer_info"] — stored (relative) offsets and draggable
@@ -397,6 +544,29 @@ void Compositor::SetLayerMesh(const std::string &id, const std::vector<float> &v
         }
 }
 
+bool Compositor::SetLayerAffine(const std::string& id, float a, float b, float c, float d,
+                               float tx, float ty) {
+    if(!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c) ||
+       !std::isfinite(d) || !std::isfinite(tx) || !std::isfinite(ty))return false;
+    for(auto& l:layers_)if(l.id==id) {
+        if(!l.affine || l.affine_a!=a || l.affine_b!=b || l.affine_c!=c || l.affine_d!=d ||
+           l.x!=tx || l.y!=ty || !l.own_pos) {
+            l.affine=true;l.affine_a=a;l.affine_b=b;l.affine_c=c;l.affine_d=d;
+            l.x=tx;l.y=ty;l.own_pos=true;++revision_;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool Compositor::ClearLayerAffine(const std::string& id) {
+    for(auto& l:layers_)if(l.id==id) {
+        if(l.affine){l.affine=false;++revision_;}
+        return true;
+    }
+    return false;
+}
+
 void Compositor::SetMessageLayered(const std::string& id, bool layered) {
     if (id.empty()) return;
     SetProps(id, {});
@@ -485,6 +655,7 @@ bool Compositor::ReadParam(const Layer &l, const std::string &param, float *v) {
 }
 
 bool Compositor::ApplyParam(Layer &l, const std::string &param, float v) {
+    if(param=="xscale" || param=="yscale" || param=="zoom" || param=="rotate")l.affine=false;
     if (param == "alpha") { l.alpha = std::clamp(v / 255.0f, 0.0f, 1.0f); return true; }
     if (param == "left" || param == "x") { l.x = v; l.own_pos = true; return true; }
     if (param == "top" || param == "y") { l.y = v; l.own_pos = true; return true; }
@@ -716,8 +887,8 @@ double Compositor::PendingAnimationMs(double now_ms) const {
 
 std::string Compositor::DescribeDrawList(size_t max_layers) const {
     std::vector<const Layer *> sorted;
-    for (const auto &l : layers_) sorted.push_back(&l);
-    std::stable_sort(sorted.begin(), sorted.end(), DrawOrderLess);
+    DrawOrderScratch scratch;
+    BuildDrawList(sorted,scratch);
     std::string out = "layers=" + std::to_string(layers_.size()) +
                       " tweens=" + std::to_string(tweens_.size()) +
                       " trans=" + std::to_string(trans_active_ ? 1 : 0) + " |";
@@ -736,20 +907,12 @@ std::string Compositor::DescribeDrawList(size_t max_layers) const {
 }
 
 std::vector<std::string> Compositor::HitLayers(float x, float y) const {
-    std::vector<const Layer *> hits;
-    for (const auto &l : layers_) {
-        if (!ContainsPoint(l,x,y)) continue;
-        hits.push_back(&l);
-    }
-    // topmost first: higher z (ZCmp) then deeper id wins
-    std::stable_sort(hits.begin(), hits.end(), [](const Layer *a, const Layer *b) {
-        const int c = LayerZCmp(*a, *b);
-        if (c != 0) return c > 0;
-        return SectionCount(a->id) > SectionCount(b->id);
-    });
+    std::vector<const Layer*> sorted;DrawOrderScratch scratch;
+    BuildDrawList(sorted,scratch);
     std::vector<std::string> ids;
-    ids.reserve(hits.size());
-    for (const Layer *l : hits) ids.push_back(l->id);
+    ids.reserve(sorted.size());
+    for(auto it=sorted.rbegin();it!=sorted.rend();++it)
+        if(ContainsPoint(**it,x,y))ids.push_back((*it)->id);
     return ids;
 }
 
@@ -1433,6 +1596,8 @@ void Compositor::SetProps(const std::string &id,
     for (auto &l : layers_) {
         if (l.id != id) continue;
         l.effect.Set(attrs);
+        if(attrs.count("rotate") || attrs.count("xscale") || attrs.count("yscale") ||
+           attrs.count("zoom") || attrs.count("reversex") || attrs.count("reversey"))l.affine=false;
         if (const auto zoom=attrs.find("zoom"); zoom!=attrs.end())
             l.sx=l.sy=ToF(zoom->second,100)/100.f;
         for (const auto &kv : attrs) {
@@ -1501,26 +1666,6 @@ void Compositor::DeleteLayer(const std::string &id) {
             ++it;
         }
     }
-}
-
-bool Compositor::RenameLayer(const std::string &id, const std::string &to) {
-    if (id.empty() || to.empty() || id == to) return false;
-    ++revision_;
-    bool any = false;
-    const std::string prefix = id + ".";
-    for (auto &l : layers_) {
-        if (l.id == id) { l.id = to; any = true; }
-        else if (l.id.compare(0, prefix.size(), prefix) == 0) {
-            l.id = to + l.id.substr(id.size());
-            any = true;
-        }
-    }
-    for (auto &tw : tweens_) {
-        if (tw.id == id) tw.id = to;
-        else if (tw.id.compare(0, prefix.size(), prefix) == 0)
-            tw.id = to + tw.id.substr(id.size());
-    }
-    return any;
 }
 
 void Compositor::ReleaseGl() {
@@ -1603,13 +1748,10 @@ void Compositor::Draw() {
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    // sort by z (stable: preserve insertion order for equal z). Scratch vector
-    // is a member so repeated frames do not re-allocate (T2-2).
+    // Immutable owner/group keys define a total order; reused scratch keeps
+    // sorting allocation-free after warmup (T2-2).
     std::vector<const Layer *> &sorted = draw_sorted_;
-    sorted.clear();
-    sorted.reserve(layers_.size());
-    for (const auto &l : layers_) sorted.push_back(&l);
-    std::stable_sort(sorted.begin(), sorted.end(), DrawOrderLess);
+    BuildDrawList(sorted,draw_order_scratch_);
 
     glUseProgram(prog_.program);
     glDisableVertexAttribArray(prog_.a_opacity);
@@ -1876,7 +2018,9 @@ uint32_t Compositor::RenderStageMask(int key, const std::vector<std::string> &id
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(prog_.program);
     glUniform2f(prog_.u_screen, float(stage_w_), float(stage_h_));
-    glUniform1f(prog_.u_top_down, 0);
+    // Coverage samples top-down stage UVs, just like effect intermediates:
+    // stage y=0 must occupy texture v=0 (the FBO's lower row).
+    glUniform1f(prog_.u_top_down, 1);
     glUniform1i(prog_.u_tex, 0);
     glActiveTexture(GL_TEXTURE0);
     glDisableVertexAttribArray(prog_.a_opacity);
@@ -1894,6 +2038,35 @@ uint32_t Compositor::RenderStageMask(int key, const std::vector<std::string> &id
         if (!transform.visible || transform.alpha <= 0) continue;
         glUniform1f(prog_.u_alpha, 1);
         glBindTexture(GL_TEXTURE_2D, layer->texture);
+        if (!layer->mesh.empty() && layer->mesh.size() % 4 == 0) {
+            // Match the leaf pass's warped xyuv triangle list, including its
+            // explicit UVs (not the quad UV bounds). Render raw source alpha:
+            // evaluating source effects here could sample this very target.
+            const size_t count = layer->mesh.size() / 4;
+            if (count > size_t(std::numeric_limits<GLsizei>::max()) ||
+                !std::all_of(layer->mesh.begin(), layer->mesh.end(),
+                             [](float v) { return std::isfinite(v); })) continue;
+            auto &vertices = draw_mesh_vertices_;
+            vertices.clear();
+            vertices.reserve(layer->mesh.size());
+            for (size_t i = 0; i < layer->mesh.size(); i += 4) {
+                const auto p = transform.Point(layer->mesh[i], layer->mesh[i + 1]);
+                if (!std::isfinite(p.first) || !std::isfinite(p.second)) {
+                    vertices.clear();
+                    break;
+                }
+                vertices.insert(vertices.end(),
+                                {p.first, p.second, layer->mesh[i + 2], layer->mesh[i + 3]});
+            }
+            if (vertices.empty()) continue;
+            glVertexAttribPointer(prog_.a_pos, 2, GL_FLOAT, GL_FALSE, 16, vertices.data());
+            glEnableVertexAttribArray(prog_.a_pos);
+            glVertexAttribPointer(prog_.a_uv, 2, GL_FLOAT, GL_FALSE, 16, vertices.data() + 2);
+            glEnableVertexAttribArray(prog_.a_uv);
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(count));
+            any = true;
+            continue;
+        }
         const auto p0 = transform.Point(0, 0), p1 = transform.Point(layer->w, 0);
         const auto p2 = transform.Point(0, layer->h), p3 = transform.Point(layer->w, layer->h);
         float verts[16] = {
@@ -1929,6 +2102,16 @@ void Compositor::SetLayerPaint(const std::string &id, int paint) {
         if (l.id != id) continue;
         if (l.effect.paint == paint) return;
         l.effect.paint = paint;
+        ++revision_;
+        return;
+    }
+}
+
+void Compositor::SetLayerEmoteTree(const std::string &id, bool on) {
+    for (auto &l : layers_) {
+        if (l.id != id) continue;
+        if (l.effect.emote_tree == on) return;
+        l.effect.emote_tree = on;
         ++revision_;
         return;
     }
@@ -2004,6 +2187,8 @@ void Compositor::SetProps(const std::string &id,
     for (auto &l : layers_) {
         if (l.id != id) continue;
         l.effect.Set(attrs);
+        if(attrs.count("rotate") || attrs.count("xscale") || attrs.count("yscale") ||
+           attrs.count("zoom") || attrs.count("reversex") || attrs.count("reversey"))l.affine=false;
         if (const auto zoom=attrs.find("zoom"); zoom!=attrs.end())
             l.sx=l.sy=ToF(zoom->second,100)/100.f;
         for (const auto &kv : attrs) {
@@ -2068,20 +2253,6 @@ void Compositor::DeleteLayer(const std::string &id) {
         }
     }
 }
-bool Compositor::RenameLayer(const std::string &id, const std::string &to) {
-    if (id.empty() || to.empty() || id == to) return false;
-    ++revision_;
-    bool any = false;
-    const std::string prefix = id + ".";
-    for (auto &l : layers_) {
-        if (l.id == id) { l.id = to; any = true; }
-        else if (l.id.compare(0, prefix.size(), prefix) == 0) {
-            l.id = to + l.id.substr(id.size());
-            any = true;
-        }
-    }
-    return any;
-}
 bool Compositor::LoadFont(const std::string &file) {
     Log(kLogInfo, "font (host, no raster): " + file);
     return false;
@@ -2137,6 +2308,15 @@ void Compositor::SetLayerPaint(const std::string &id, int paint) {
     for (auto &l : layers_) {
         if (l.id != id) continue;
         l.effect.paint = paint;
+        ++revision_;
+        return;
+    }
+}
+void Compositor::SetLayerEmoteTree(const std::string &id, bool on) {
+    for (auto &l : layers_) {
+        if (l.id != id) continue;
+        if (l.effect.emote_tree == on) return;
+        l.effect.emote_tree = on;
         ++revision_;
         return;
     }

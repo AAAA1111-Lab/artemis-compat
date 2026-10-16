@@ -28,15 +28,22 @@
 #include "util/snapshot_image.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <charconv>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
-#include <fstream>
+#include <fcntl.h>
 #include <memory>
+#include <limits>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 using namespace artc;
 
@@ -62,8 +69,39 @@ struct ScriptedSnapshot {
     long long frame = 0;
 };
 std::vector<ScriptedSnapshot> g_snapshot_list;
-long long g_snapshot_frame = 0;
-std::string g_snapshot_path;
+std::vector<ScriptedSnapshot> g_snapshot_requests;
+long long g_exit_at_frame = 0;  // zero retains the interactive host contract
+
+bool ParseFrame(const std::string &text, long long &frame) {
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), frame);
+    return result.ec == std::errc() && result.ptr == text.data() + text.size() && frame > 0;
+}
+
+bool ParseCoordinate(const std::string &text, float &value) {
+    char *end = nullptr;
+    errno = 0;
+    value = std::strtof(text.c_str(), &end);
+    return !text.empty() && text.find_first_of(" \t\r\n\f\v") == std::string::npos &&
+           end == text.c_str() + text.size() && errno != ERANGE &&
+           std::isfinite(value) &&
+           static_cast<double>(value) >= std::numeric_limits<int>::min() &&
+           static_cast<double>(value) <= std::numeric_limits<int>::max();
+}
+
+// Snapshot files are diagnostic artifacts, not saves. Never truncate an older
+// capture (including when another process wins a race after argument parsing).
+bool WriteSnapshot(const std::string &path, const std::vector<uint8_t> &png) {
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return false;
+    size_t offset = 0;
+    while (offset < png.size()) {
+        const ssize_t n = ::write(fd, png.data() + offset, png.size() - offset);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { const int saved = errno; ::close(fd); errno = saved; return false; }
+        offset += static_cast<size_t>(n);
+    }
+    return ::close(fd) == 0;
+}
 
 // Set while a native [dialog] input box is up so the frame timer does not
 // re-enter the engine from inside the nested modal run loop.
@@ -83,7 +121,29 @@ struct Engine {
     bool booted = false;
     uint64_t drawn_rev = ~0ull;   // redraw gate: last presented layer revision
     bool exit_requested = false;
-    bool snapshot_pending = false;
+    int exit_code = 0;
+    std::vector<std::string> pending_snapshots;
+    std::set<std::string> completed_snapshots;
+    long long completed_frame = 0;
+    bool acceptance_reported = false;
+
+    void FinishAcceptance() {
+        if (!g_exit_at_frame || acceptance_reported) return;
+        acceptance_reported = true;
+        size_t unfinished = 0;
+        for (const auto &request : g_snapshot_requests) {
+            if (completed_snapshots.count(request.path)) continue;
+            ++unfinished;
+            Log(kLogError, "mac host: unfinished snapshot " + request.path + " @" +
+                           std::to_string(request.frame));
+        }
+        if (completed_frame < g_exit_at_frame || unfinished) exit_code = 1;
+        Log(exit_code ? kLogError : kLogInfo,
+            "mac host: acceptance completed_frame=" + std::to_string(completed_frame) +
+            " target_frame=" + std::to_string(g_exit_at_frame) +
+            " unfinished_snapshots=" + std::to_string(unfinished) +
+            " exit_code=" + std::to_string(exit_code));
+    }
 
     // view metrics: points for input mapping, backing pixels for glViewport
     float pt_w = 1280, pt_h = 720;
@@ -92,9 +152,10 @@ struct Engine {
     std::mutex mutex;
     std::deque<RawInput> events;
 
-    bool Open(const std::string &game_path, const std::string &os) {
+    bool Open(const std::string &game_path, const std::string &os,
+              const std::string &save_dir) {
         ctx = std::make_unique<artc::EngineContext>();
-        if (!ctx->Open(game_path, os)) {
+        if (!ctx->Open(game_path, os, {}, save_dir)) {
             ctx.reset();
             return false;
         }
@@ -296,6 +357,7 @@ struct Engine {
             return;
         }
         if (!booted && !Boot()) {
+            exit_code = 1;
             exit_requested = true;
             return;
         }
@@ -326,8 +388,7 @@ struct Engine {
             // Dev-only full-resolution frame snapshots (--snapshot out.png@frame).
             for (auto it = g_snapshot_list.begin(); it != g_snapshot_list.end();) {
                 if (it->frame == g_frame_index) {
-                    g_snapshot_path = it->path;
-                    snapshot_pending = true;
+                    pending_snapshots.push_back(it->path);
                     it = g_snapshot_list.erase(it);
                 } else {
                     ++it;
@@ -351,19 +412,33 @@ struct Engine {
                 Present();
                 drawn_rev = ctx->compositor().Revision();
             }
-            if (snapshot_pending) {
-                snapshot_pending = false;
+            if (!pending_snapshots.empty()) {
                 SnapshotImage image;
-                if (ctx->compositor().Snapshot(image)) {
-                    std::vector<uint8_t> png;
-                    if (image.EncodePng(image.width, image.height, png)) {
-                        std::ofstream out(g_snapshot_path, std::ios::binary);
-                        out.write(reinterpret_cast<const char *>(png.data()), png.size());
-                        Log(kLogInfo, "mac host: snapshot -> " + g_snapshot_path);
+                std::vector<uint8_t> png;
+                if (!ctx->compositor().Snapshot(image) ||
+                    !image.EncodePng(image.width, image.height, png)) {
+                    Log(kLogError, "mac host: snapshot capture/encode failed");
+                    exit_code = 1;
+                    exit_requested = true;
+                } else {
+                    for (const auto &path : pending_snapshots) {
+                        if (!WriteSnapshot(path, png)) {
+                            Log(kLogError, "mac host: snapshot write failed: " + path +
+                                           ": " + std::strerror(errno));
+                            exit_code = 1;
+                            exit_requested = true;
+                        } else {
+                            completed_snapshots.insert(path);
+                            Log(kLogInfo, "mac host: snapshot -> " + path);
+                        }
                     }
                 }
+                pending_snapshots.clear();
             }
             ctx->lua().EndFrame();
+            completed_frame = g_frame_index;
+            if (g_exit_at_frame && g_frame_index >= g_exit_at_frame)
+                exit_requested = true;  // capture and EndFrame happen before exit
         }
     }
 };
@@ -414,7 +489,18 @@ int KeyCodeForEvent(NSEvent *event) {
     g_engine->Tick((float)backing.size.width, (float)backing.size.height,
                    (float)bounds.size.width, (float)bounds.size.height);
     [[self openGLContext] flushBuffer];
-    if (g_engine->exit_requested) [NSApp terminate:nil];
+    if (g_engine->exit_requested) {
+        g_engine->FinishAcceptance();
+        if (g_exit_at_frame || g_engine->exit_code) {
+            [timer invalidate];
+            [NSApp stop:nil];
+            // stop: can wait for the next event before run returns. Wake it
+            // even when a scripted run has no mouse/keyboard traffic.
+            [NSApp postEvent:[NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0
+                context:nil subtype:0 data1:0 data2:0] atStart:NO];
+        } else [NSApp terminate:nil];
+    }
 }
 
 - (void)sendPointer:(NSEvent *)event down:(BOOL)down move:(BOOL)move {
@@ -452,6 +538,17 @@ int KeyCodeForEvent(NSEvent *event) {
 @interface ArctAppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @end
 @implementation ArctAppDelegate
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)app {
+    if (g_engine && g_exit_at_frame) {
+        g_engine->FinishAcceptance();
+        [app stop:nil];
+        [app postEvent:[NSEvent otherEventWithType:NSEventTypeApplicationDefined
+            location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0
+            context:nil subtype:0 data1:0 data2:0] atStart:NO];
+        return NSTerminateCancel;  // bounded runs return their acceptance code from main
+    }
+    return NSTerminateNow;
+}
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app {
     return YES;
 }
@@ -459,30 +556,80 @@ int KeyCodeForEvent(NSEvent *event) {
 
 int main(int argc, char **argv) {
     @autoreleasepool {
-        if (argc < 2) {
+        if (argc < 2 || std::strcmp(argv[1], "--help") == 0) {
             std::fprintf(stderr,
-                         "usage: artemis-mac <game-dir|pack.pfs> [--os windows|android]\n");
-            return 2;
+                         "usage: artemis-mac <game-dir|pack.pfs> [--os windows|android]\n"
+                         "  [--save-dir path] [--frames N | --exit-at-frame N]\n"
+                         "  [--tap x,y@frame]... [--snapshot out.png@frame]...\n"
+                         "Frames are positive, 1-based; exit follows snapshots at frame N.\n"
+                         "Bounded runs fail if they exit before N or leave requested snapshots unfinished.\n"
+                         "Tap coordinates must be finite and within signed int range.\n"
+                         "Snapshots must be new files; use a unique private output directory.\n");
+            return argc < 2 ? 2 : 0;
         }
         std::string game_path = argv[1];
         std::string os = "windows";
+        std::string save_dir;
+        auto bad = [](const std::string &message) {
+            std::fprintf(stderr, "artemis-mac: %s\n", message.c_str());
+            return 2;
+        };
+        if (game_path.rfind("--", 0) == 0) return bad("expected game path, got option: " + game_path);
         for (int i = 2; i < argc; ++i) {
-            if (std::strcmp(argv[i], "--os") == 0 && i + 1 < argc) os = argv[++i];
-            else if (std::strcmp(argv[i], "--tap") == 0 && i + 1 < argc) {
+            const std::string option = argv[i];
+            if (option != "--os" && option != "--save-dir" && option != "--tap" &&
+                option != "--snapshot" && option != "--frames" && option != "--exit-at-frame")
+                return bad("unknown option: " + option);
+            if (i + 1 >= argc || !*argv[i + 1] || std::strncmp(argv[i + 1], "--", 2) == 0)
+                return bad("missing value for " + option);
+            const std::string value = argv[++i];
+            if (option == "--os") {
+                if (value != "windows" && value != "android") return bad("invalid --os: " + value);
+                os = value;
+            } else if (option == "--save-dir") {
+                if (!save_dir.empty()) return bad("--save-dir may only be specified once");
+                save_dir = value;
+            } else if (option == "--frames" || option == "--exit-at-frame") {
+                if (g_exit_at_frame || !ParseFrame(value, g_exit_at_frame))
+                    return bad("specify one positive integer frame limit");
+            } else if (option == "--tap") {
                 float x = 0, y = 0;
                 long long frame = 0;
-                if (std::sscanf(argv[++i], "%f,%f@%lld", &x, &y, &frame) == 3)
-                    g_scripted_taps.push_back({x, y, frame});
-            } else if (std::strcmp(argv[i], "--snapshot") == 0 && i + 1 < argc) {
-                char path[1024] = {};
+                const auto comma = value.find(','), at = value.rfind('@');
+                if (comma == std::string::npos || at == std::string::npos || comma >= at ||
+                    !ParseCoordinate(value.substr(0, comma), x) ||
+                    !ParseCoordinate(value.substr(comma + 1, at - comma - 1), y) ||
+                    !ParseFrame(value.substr(at + 1), frame)) return bad("invalid --tap: " + value);
+                g_scripted_taps.push_back({x, y, frame});
+            } else if (option == "--snapshot") {
                 long long frame = 0;
-                if (std::sscanf(argv[++i], "%1023[^@]@%lld", path, &frame) == 2)
-                    g_snapshot_list.push_back({path, frame});
+                const auto at = value.rfind('@');
+                if (at == std::string::npos || at == 0 || !ParseFrame(value.substr(at + 1), frame))
+                    return bad("invalid --snapshot: " + value);
+                const std::string path = value.substr(0, at);
+                std::error_code ec;
+                const auto absolute = fs::absolute(path, ec).lexically_normal();
+                if (ec) return bad("invalid snapshot path: " + path);
+                const auto status = fs::symlink_status(absolute, ec);
+                if (fs::exists(status) || (ec && ec != std::errc::no_such_file_or_directory))
+                    return bad("snapshot path exists or is inaccessible: " + path);
+                for (const auto &snapshot : g_snapshot_list)
+                    if (snapshot.path == absolute.string()) return bad("duplicate snapshot path: " + path);
+                g_snapshot_list.push_back({absolute.string(), frame});
+                g_snapshot_requests.push_back(g_snapshot_list.back());
             }
         }
+        for (const auto &tap : g_scripted_taps)
+            if (g_exit_at_frame && tap.frame > g_exit_at_frame) return bad("tap is after exit frame");
+        for (const auto &snapshot : g_snapshot_list)
+            if (g_exit_at_frame && snapshot.frame > g_exit_at_frame) return bad("snapshot is after exit frame");
 
         auto engine = std::make_unique<Engine>();
-        if (!engine->Open(game_path, os)) return 1;
+        if (!engine->Open(game_path, os, save_dir)) {
+            engine->exit_code = 1;
+            engine->FinishAcceptance();
+            return 1;
+        }
         g_engine = engine.get();
 
         [NSApplication sharedApplication];
@@ -524,6 +671,13 @@ int main(int argc, char **argv) {
                                                 repeats:YES];
         [[NSRunLoop currentRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
         [NSApp run];
+        [timer invalidate];
+        [[view openGLContext] makeCurrentContext];
+        engine->FinishAcceptance();
+        const int exit_code = engine->exit_code;
+        g_engine = nullptr;
+        engine.reset();
+        return exit_code;
     }
     return 0;
 }

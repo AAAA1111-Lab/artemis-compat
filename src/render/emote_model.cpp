@@ -1,5 +1,6 @@
 #include "render/emote_model.h"
 #include "render/block_decode.h"
+#include "log/logger.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -28,8 +29,6 @@ bool EmoteModel::Load(PsbDocument document,std::string& error) {
             if(v.At("label").string.empty())throw std::runtime_error("E-mote variable has no label");
             next.variables_.insert(v.At("label").string);
         }
-        std::set<std::string> instant;
-        for(const auto& v:metadata.At("instantVariableList").array)instant.insert(v.string);
         for(const auto& e:metadata.At("eyeControl").array) {
             EmoteBlink blink;
             blink.variable=e.At("label").string;
@@ -44,6 +43,14 @@ bool EmoteModel::Load(PsbDocument document,std::string& error) {
             next.blinks_.push_back(std::move(blink));
         }
         next.mirror_=Number(metadata.At("mirror"))!=0;
+        const auto& mirror_matches=metadata.At("mirrorControl").At("variableMatchList");
+        if(mirror_matches.type!=PsbValue::Null && mirror_matches.type!=PsbValue::Array)
+            throw std::runtime_error("invalid E-mote mirror variable match list");
+        for(const auto& match:mirror_matches.array) {
+            if(match.type!=PsbValue::String)
+                throw std::runtime_error("invalid E-mote mirror variable match string");
+            next.mirror_variable_matches_.push_back(match.string);
+        }
         for(const auto& s:metadata.At("selectorControl").array) {
             EmoteSelector selector;
             selector.label=s.At("label").string;
@@ -78,6 +85,31 @@ bool EmoteModel::Load(PsbDocument document,std::string& error) {
                 next.removals_.push_back(std::move(removal));
             }
         }
+        // clampControl has no established algorithm (type 0) and type 1 (pair
+        // circle projection) is not implemented. Neither is applied or faked by a
+        // scalar clamp: the control is ignored and reported, the model still loads.
+        const auto& clamps=metadata.At("clampControl");
+        if(clamps.type==PsbValue::Array)
+            for(const auto& clamp:clamps.array) {
+                const auto& enabled=clamp.At("enabled");
+                if(!(enabled.type==PsbValue::Null || enabled.number!=0))continue;
+                const auto& type=clamp.At("type");
+                if(type.type!=PsbValue::Number)continue;
+                const bool whole=std::isfinite(type.number) && type.number==std::floor(type.number) &&
+                    std::abs(type.number)<1e9;
+                next.features_.Add(whole?"clampControl.type"+std::to_string(static_cast<long long>(type.number))
+                                        :std::string("clampControl.typeOther"));
+            }
+        // E10 configuration + registry plan. Only controllers actually registered
+        // here occupy labels. The effective instant set (authored + successful
+        // absent-key defaults) MUST exist before timeline tracks are parsed.
+        if(!next.control_.Load(metadata,error))throw std::runtime_error(error);
+        std::set<std::string> registered;
+        for(const auto& blink:next.blinks_)if(blink.enabled)registered.insert(blink.variable);
+        for(const auto& selector:next.selectors_)if(selector.enabled)registered.insert(selector.label);
+        if(!BuildEmoteControlRegistryPlan(next.control_,registered,next.control_plan_,error))
+            throw std::runtime_error(error);
+        const std::set<std::string>& instant=next.control_plan_.instant_variables;
         for(const auto& t:metadata.At("timelineControl").array) {
             EmoteTimeline timeline;const auto label=t.At("label").string;
             if(label.empty())throw std::runtime_error("E-mote timeline has no label");
@@ -86,6 +118,7 @@ bool EmoteModel::Load(PsbDocument document,std::string& error) {
             if(!(timeline.loop_begin==-1 && timeline.loop_end==-1) &&
                (timeline.loop_begin<0 || timeline.loop_end<timeline.loop_begin))
                 throw std::runtime_error("invalid E-mote timeline loop");
+            if(timeline.loop_begin<0 && timeline.last_time<0)next.features_.Add("timeline.openEnded");
             for(const auto& track:t.At("variableList").array) {
                 EmoteTrack result;result.variable=track.At("label").string;result.instant=instant.count(result.variable);
                 // A variable may have multiple ordered tracks (e.g. eyebrow
@@ -108,8 +141,56 @@ bool EmoteModel::Load(PsbDocument document,std::string& error) {
             if(!next.timelines_.emplace(label,std::move(timeline)).second)
                 throw std::runtime_error("duplicate E-mote timeline");
         }
-        // Sync frame per motion (reference host/krkrsdl3): max content frame
-        // over non-parameterized nodes, following child motion references.
+        // Motion-tag sync is distinct from the legacy recursive derivation below.
+        // Android MMotionPlayer::SkipToSync (0x6ab794), normal non-loop branch:
+        // select the first qualifying authored tag, else lastTime. Shape/finite
+        // checks and rejection of unordered tags are OUR local safety policy,
+        // not a claim about official malformed-input handling. Do not sort tags
+        // or infer that the official implementation minimizes an unordered list.
+        for(const auto& obj:document.root.At("object").object)
+            for(const auto& mtn:obj.second.At("motion").object) {
+                const auto& m=mtn.second;
+                if(m.type!=PsbValue::Object)continue;
+                MotionTagSync result;
+                result.last_time=Number(m.At("lastTime"));
+                result.loop=Number(m.At("loopTime"),-1)>=0;
+                const auto& tags=m.At("tag");
+                if(tags.type!=PsbValue::Null && tags.type!=PsbValue::Array)
+                    throw std::runtime_error("invalid E-mote motion tag array");
+                const auto tag_number=[](const PsbValue& v) {
+                    if(v.type!=PsbValue::Number || !std::isfinite(v.number))
+                        throw std::runtime_error("invalid E-mote motion tag number");
+                    return v.number;
+                };
+                double previous=0;bool first=true;
+                for(const auto& tag:tags.array) {
+                    if(tag.type!=PsbValue::Object)
+                        throw std::runtime_error("invalid E-mote motion tag object");
+                    const double time=tag_number(tag.At("time"));
+                    const double type=tag_number(tag.At("type"));
+                    if(type!=std::floor(type))
+                        throw std::runtime_error("invalid E-mote motion tag type");
+                    if(!first && time<previous)
+                        throw std::runtime_error("unordered E-mote motion tags (local safety policy)");
+                    previous=time;first=false;
+                    const auto& content=tag.At("content");
+                    if(content.type!=PsbValue::Null && content.type!=PsbValue::Object)
+                        throw std::runtime_error("invalid E-mote motion tag content");
+                    const auto& sync=content.At("sync");
+                    // Accept PSB booleans and numeric 0/1, not coerced strings
+                    // or arbitrary numeric truthiness (a local shape policy).
+                    if(sync.type!=PsbValue::Null &&
+                       ((sync.type!=PsbValue::Boolean && sync.type!=PsbValue::Number) ||
+                        !std::isfinite(sync.number) || (sync.number!=0 && sync.number!=1)))
+                        throw std::runtime_error("invalid E-mote motion tag sync flag");
+                    if(type==1 && sync.type!=PsbValue::Null && sync.number==1)
+                        result.frames.push_back(time);
+                }
+                next.motion_tag_sync_.emplace(std::make_pair(obj.first,mtn.first),std::move(result));
+            }
+        // Legacy derived extension (reference host/krkrsdl3), NOT native Android
+        // sync/completion: max content time over non-parameterized nodes,
+        // following child motion references. Preserve existing consumers.
         std::set<std::pair<std::string,std::string>> visiting;
         std::function<double(const std::string&,const std::string&)> sync=
             [&](const std::string& chara,const std::string& motion)->double {
@@ -148,14 +229,45 @@ bool EmoteModel::Load(PsbDocument document,std::string& error) {
                 const double s=sync(obj.first,mtn.first);
                 if(s>=0)next.sync_frames_[{obj.first,mtn.first}]=s;
             }
-        next.document_=std::move(document);*this=std::move(next);error.clear();return true;
+        next.document_=std::move(document);*this=std::move(next);error.clear();
+        LogEmoteUnsupportedFeatures("model",features_);
+        return true;
     } catch(const std::exception& e){error=e.what();return false;}
 }
 double EmoteModel::SyncFrame(const std::string& chara,const std::string& motion) const {
     const auto it=sync_frames_.find({chara,motion});
     return it==sync_frames_.end()?-1:it->second;
 }
-bool EmoteModel::Image(const std::string& source,const std::string& icon,EmoteImage& out,std::string& error) const {
+std::optional<double> EmoteModel::NextMotionSyncFrame(const std::string& chara,
+                                                     const std::string& motion,double current) const {
+    if(!std::isfinite(current))return std::nullopt;
+    const auto it=motion_tag_sync_.find({chara,motion});
+    if(it==motion_tag_sync_.end() || it->second.loop)return std::nullopt;
+    for(double time:it->second.frames)
+        if(time>=current)return time;
+    return it->second.last_time;
+}
+EmoteAtlasCache::Entry* EmoteAtlasCache::Find(const void* owner,const std::string& source) {
+    if(owner_!=owner) {entries_.clear();bytes_=0;owner_=owner;return nullptr;}
+    for(auto& entry:entries_)
+        if(entry.source==source) {entry.stamp=++clock_;return &entry;}
+    return nullptr;
+}
+EmoteAtlasCache::Entry* EmoteAtlasCache::Insert(const void* owner,std::string source,
+                                                std::vector<uint8_t>&& rgba,bool exact) {
+    if(owner_!=owner) {entries_.clear();bytes_=0;owner_=owner;}
+    if(rgba.size()>limit_)return nullptr;
+    while(!entries_.empty() && rgba.size()>limit_-bytes_) {
+        auto oldest=entries_.begin();
+        for(auto it=entries_.begin();it!=entries_.end();++it)if(it->stamp<oldest->stamp)oldest=it;
+        bytes_-=oldest->rgba.size();entries_.erase(oldest);
+    }
+    bytes_+=rgba.size();
+    entries_.push_back({std::move(source),std::move(rgba),exact,++clock_});
+    return &entries_.back();
+}
+bool EmoteModel::Image(const std::string& source,const std::string& icon,EmoteImage& out,std::string& error,
+                       EmoteAtlasCache* cache) const {
     try {
         const auto& root=document_.root;const auto& src=root.At("source").At(source);
         const auto& image=src.At("icon").At(icon);
@@ -183,7 +295,18 @@ bool EmoteModel::Image(const std::string& source,const std::string& icon,EmoteIm
         }
         EmoteImage result;result.width=int(crop_w);result.height=int(crop_h);
         result.origin_x=Number(image.At("originX"));result.origin_y=Number(image.At("originY"));
+        // A mip chain appends levels after level 0; only level 0 is read. The
+        // flag comes from the icon, so it can differ between icons of one atlas.
+        const auto has_mip=[](const PsbValue& v) {
+            if(v.type==PsbValue::Number)return v.number!=0;
+            return v.type!=PsbValue::Null;
+        };
+        const bool mips=has_mip(image.At("mipMap")) || has_mip(image.At("mipMapLevel"));
+        // Decode the whole texture (the shared atlas, or this icon's own pixels)
+        // to RGBA8. `exact` reports that the resource held exactly level 0.
+        const auto decode_full=[&](std::vector<uint8_t>& full,bool& exact) {
         std::vector<uint8_t> bytes,palette,decoded;
+        exact=true;
         if(!document_.ReadResource(size_src.At("pixel"),bytes))throw std::runtime_error("missing E-mote pixel resource");
         const auto format=size_src.At("type").string;
         const bool indexed=!atlas && format=="CI8";
@@ -222,18 +345,12 @@ bool EmoteModel::Image(const std::string& source,const std::string& icon,EmoteIm
         if(compress=="RL") {
             if(!DecodePsbRl(bytes,raw_bytes/stride,stride,decoded))throw std::runtime_error("invalid E-mote RL texture");
         } else if(compress.empty() || compress=="none") {
-            // A mip chain appends levels after level 0; only level 0 is read.
-            const auto has_mip=[](const PsbValue& v) {
-                if(v.type==PsbValue::Number)return v.number!=0;
-                return v.type!=PsbValue::Null;
-            };
-            const bool mips=has_mip(image.At("mipMap")) || has_mip(image.At("mipMapLevel"));
             if(bytes.size()<raw_bytes || (!mips && bytes.size()!=raw_bytes))
                 throw std::runtime_error("invalid E-mote raw texture length");
+            exact=bytes.size()==raw_bytes;
             bytes.resize(raw_bytes);
             decoded=std::move(bytes);
         } else throw std::runtime_error("unsupported E-mote texture compression");
-        std::vector<uint8_t> full;
         if(indexed) {
             full.resize(tex_count*4);
             for(size_t i=0;i<tex_count;++i) {
@@ -276,6 +393,22 @@ bool EmoteModel::Image(const std::string& source,const std::string& icon,EmoteIm
         // naturally as well.
         if((spec=="krkr" || spec=="win") && (rgba8 || rgbx8 || indexed))
             for(size_t i=0;i<full.size();i+=4)std::swap(full[i],full[i+2]);
+        };
+        std::vector<uint8_t> local;const std::vector<uint8_t>* pixels=&local;
+        if(atlas && cache) {
+            auto* hit=cache->Find(this,source);
+            if(hit) {
+                // Same checks the uncached path would make for this icon.
+                if(!mips && !hit->exact)throw std::runtime_error("invalid E-mote raw texture length");
+                ++cache->hits_;pixels=&hit->rgba;
+            } else {
+                bool exact=true;decode_full(local,exact);++cache->decodes_;
+                if(auto* kept=cache->Insert(this,source,std::move(local),exact))pixels=&kept->rgba;
+                // else: too large to retain; `local` still owns the pixels (the
+                // failed Insert left it untouched), used once for this icon.
+            }
+        } else {bool exact=true;decode_full(local,exact);}
+        const std::vector<uint8_t>& full=*pixels;
         if(atlas && (left>0 || top>0 || crop_w!=tex_w || crop_h!=tex_h)) {
             result.rgba.resize(size_t(crop_w)*size_t(crop_h)*4);
             for(int y=0;y<int(crop_h);++y) {
@@ -283,7 +416,8 @@ bool EmoteModel::Image(const std::string& source,const std::string& icon,EmoteIm
                 std::copy_n(full.data()+src_row*4,size_t(crop_w)*4,
                             result.rgba.data()+size_t(y)*size_t(crop_w)*4);
             }
-        } else result.rgba=std::move(full);
+        } else if(pixels==&local)result.rgba=std::move(local);
+        else result.rgba=full;
         out=std::move(result);error.clear();return true;
     } catch(const std::exception& e){error=e.what();return false;}
 }

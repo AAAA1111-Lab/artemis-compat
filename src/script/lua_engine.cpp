@@ -26,6 +26,7 @@
 #include <new>       // placement new for the E-mote proxy userdata
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <ctime>
 #include <cstdlib>
 #include <fstream>
@@ -85,7 +86,7 @@ char kPackKey;
 } // namespace
 
 // ---- E-mote layer proxies (e:createEmoteLayer) ----
-// The userdata holds {engine, layer id}; every method resolves the live
+// The userdata holds {engine, layer id, weak instance token}; every method resolves the live
 // player through the engine registry, so a proxy surviving a lydel or a
 // same-id replace reports "layer removed" instead of dangling. Method
 // names follow the reference motion-player binding; the original proxy was
@@ -94,16 +95,18 @@ char kPackKey;
 // (system/image/emote.lua + art3m1s-core binding): transitions/fades/progress
 // take FRAMES at 60 fps and are converted to this module's millisecond clock,
 // setCoord is (x, y, z, angle), setScale is (scale, origin_x, origin_y) and
-// setColor is 0xRRGGBBAA. Unregistered physics methods (startWind,
-// setOuterForce, setOuterRot, ...) fall through to a logging stub like the
-// e-table does — this layer deliberately does not fake SDK behavior it
-// cannot render. `contains`/`hitTest` query the shape layers.
+// setColor is 0xRRGGBBAA. Outer-force/rotation methods validate the documented
+// signature then explicitly report unsupported physics (E5 decision A).
+// Unknown methods (including startWind, whose signature is not established)
+// retain the e-table-style discovery stub. No physics is simulated here.
+// `contains`/`hitTest` query the shape layers.
 namespace {
 const char kEmoteMetaName[] = "artc.emote";
 
 struct EmoteProxy {
     LuaEngine *engine;
     std::string id;
+    std::weak_ptr<const void> lifetime;
 };
 
 EmoteProxy *CheckEmoteProxy(lua_State *L) {
@@ -114,7 +117,10 @@ EmoteProxy *CheckEmoteProxy(lua_State *L) {
 // nil + "E-mote layer removed" on the stack (caller returns 2).
 EmotePlayer *Emote(lua_State *L) {
     EmoteProxy *p = CheckEmoteProxy(L);
-    if (p) {
+    // Check before touching engine: destruction clears its registry (and thus
+    // expires the token) before Lua finalizers run. Same-id creation cannot
+    // resurrect an old token, even if the allocator reuses a player address.
+    if (p && !p->lifetime.expired()) {
         EmotePlayer *e = p->engine->FindEmote(p->id);
         if (e) return e;
     }
@@ -234,6 +240,46 @@ int m_setBustScale(lua_State *L) {
     e->SetBustScale(luaL_checknumber(L, 2));
     return 0;
 }
+// docs/emote-driver-contract.md establishes only the argument types/counts
+// and force part names, not axes, units or a physical model. E5 decision A:
+// reject malformed calls; valid calls return false + reason without touching
+// the player. Deduplicate by canonical method (including case aliases), just
+// as the unknown-method discovery stub does, rather than logging each frame.
+constexpr char kOuterForceUnsupported[] = "unsupported E-mote physics: setOuterForce";
+constexpr char kOuterRotUnsupported[] = "unsupported E-mote physics: setOuterRot";
+int EmotePhysicsUnsupported(lua_State *L, const char *reason) {
+    static std::set<const char *> reported;  // keys are the canonical arrays above
+    if (reported.insert(reason).second) Log(kLogWarn, std::string("emote: ") + reason);
+    lua_pushboolean(L, false);
+    lua_pushstring(L, reason);
+    return 2;
+}
+bool EmoteFiniteNumbers(lua_State *L, int first, int last) {
+    for (int i = first; i <= last; ++i)
+        if (lua_type(L, i) != LUA_TNUMBER || !std::isfinite(lua_tonumber(L, i)))
+            return false;
+    return true;
+}
+int m_setOuterForce(lua_State *L) {
+    if (!Emote(L)) return 2;  // stale handles take precedence over validation
+    if (lua_gettop(L) != 6 || lua_type(L, 2) != LUA_TSTRING)
+        return EmoteError(L, "setOuterForce expects part and four finite numbers");
+    size_t length = 0;
+    const char *part = lua_tolstring(L, 2, &length);
+    if (!((length == 4 && std::memcmp(part, "bust", 4) == 0) ||
+          (length == 4 && std::memcmp(part, "hair", 4) == 0) ||
+          (length == 5 && std::memcmp(part, "parts", 5) == 0)))
+        return EmoteError(L, "setOuterForce part must be bust, hair or parts");
+    if (!EmoteFiniteNumbers(L, 3, 6))
+        return EmoteError(L, "setOuterForce expects part and four finite numbers");
+    return EmotePhysicsUnsupported(L, kOuterForceUnsupported);
+}
+int m_setOuterRot(lua_State *L) {
+    if (!Emote(L)) return 2;
+    if (lua_gettop(L) != 4 || !EmoteFiniteNumbers(L, 2, 4))
+        return EmoteError(L, "setOuterRot expects three finite numbers");
+    return EmotePhysicsUnsupported(L, kOuterRotUnsupported);
+}
 int m_show(lua_State *L) {
     EmotePlayer *e = Emote(L);
     if (!e) return 2;
@@ -251,8 +297,12 @@ int m_playTimeline(lua_State *L) {
     EmotePlayer *e = Emote(L);
     if (!e) return 2;
     const char *label = luaL_checkstring(L, 2);
+    const double flags = luaL_optnumber(L, 3, 0);
+    if (!std::isfinite(flags) || flags != std::floor(flags) ||
+        flags < std::numeric_limits<int>::min() || flags > std::numeric_limits<int>::max())
+        return EmoteError(L, "playTimeline flags must be a finite integer");
     std::string error;
-    if (!e->PlayTimeline(label, static_cast<int>(luaL_optinteger(L, 3, 0)), error))
+    if (!e->PlayTimeline(label, static_cast<int>(flags), error))
         return EmoteError(L, error);
     lua_pushboolean(L, true);
     return 1;
@@ -305,16 +355,29 @@ int m_fadeOutTimeline(lua_State *L) {
     return 1;
 }
 // setTimelineBlendRatio(label, ratio [, frames [, ease [, flags]]]) — flags
-// non-zero arms the fade-out stop.
+// non-zero arms the fade-out stop, per emote_player.h's existing local
+// contract (not a new claim about native flag bits). Booleans remain accepted.
 int m_setTimelineBlendRatio(lua_State *L) {
     EmotePlayer *e = Emote(L);
     if (!e) return 2;
     const char *label = luaL_checkstring(L, 2);
+    // Keep existing positional argument exceptions visible to pcall even
+    // when flags are also invalid; validate everything before player mutation.
+    const double ratio = luaL_checknumber(L, 3);
+    const double transition_ms = luaL_optnumber(L, 4, 0) * kEmoteFrameMs;
+    const double ease = luaL_optnumber(L, 5, 0);
+    bool fade_out_stop = false;
+    if (!lua_isnoneornil(L, 6)) {
+        if (lua_type(L, 6) == LUA_TBOOLEAN) {
+            fade_out_stop = lua_toboolean(L, 6) != 0;
+        } else if (EmoteFiniteNumbers(L, 6, 6)) {
+            fade_out_stop = lua_tonumber(L, 6) != 0;
+        } else {
+            return EmoteError(L, "setTimelineBlendRatio flags must be a finite number or boolean");
+        }
+    }
     std::string error;
-    if (!e->SetTimelineBlendRatio(label, luaL_checknumber(L, 3),
-                                  luaL_optnumber(L, 4, 0) * kEmoteFrameMs,
-                                  luaL_optnumber(L, 5, 0),
-                                  lua_toboolean(L, 6) != 0, error))
+    if (!e->SetTimelineBlendRatio(label, ratio, transition_ms, ease, fade_out_stop, error))
         return EmoteError(L, error);
     lua_pushboolean(L, true);
     return 1;
@@ -429,6 +492,26 @@ int m_setVariableDiff(lua_State *L) {
     lua_pushboolean(L, true);
     return 1;
 }
+int m_getVariableDiff(lua_State *L) {
+    EmotePlayer *e = Emote(L);
+    if (!e) return 2;
+    lua_pushnumber(L, e->GetVariableDiff(luaL_checkstring(L, 2), luaL_checkstring(L, 3)));
+    return 1;
+}
+int m_setQueuing(lua_State *L) {
+    EmotePlayer *e = Emote(L);
+    if (!e) return 2;
+    if (lua_type(L, 2) != LUA_TBOOLEAN)
+        return EmoteError(L, "setQueuing expects a boolean");
+    e->SetQueuing(lua_toboolean(L, 2) != 0);
+    return 0;
+}
+int m_getQueuing(lua_State *L) {
+    EmotePlayer *e = Emote(L);
+    if (!e) return 2;
+    lua_pushboolean(L, e->GetQueuing());
+    return 1;
+}
 int m_getAnimating(lua_State *L) {
     EmotePlayer *e = Emote(L);
     if (!e) return 2;
@@ -496,6 +579,8 @@ const struct {
     {"SetMeshDivisionRatio", m_setMeshDivisionRatio},
     {"setHairScale", m_setHairScale}, {"SetHairScale", m_setHairScale},
     {"setBustScale", m_setBustScale}, {"SetBustScale", m_setBustScale},
+    {"setOuterForce", m_setOuterForce}, {"SetOuterForce", m_setOuterForce},
+    {"setOuterRot", m_setOuterRot}, {"SetOuterRot", m_setOuterRot},
     {"show", m_show}, {"Show", m_show},
     {"hide", m_hide}, {"Hide", m_hide},
     {"playTimeline", m_playTimeline}, {"PlayTimeline", m_playTimeline},
@@ -531,6 +616,9 @@ const struct {
     {"setVariable", m_setVariable}, {"SetVariable", m_setVariable},
     {"getVariable", m_getVariable}, {"GetVariable", m_getVariable},
     {"setVariableDiff", m_setVariableDiff}, {"SetVariableDiff", m_setVariableDiff},
+    {"getVariableDiff", m_getVariableDiff}, {"GetVariableDiff", m_getVariableDiff},
+    {"setQueuing", m_setQueuing}, {"SetQueuing", m_setQueuing},
+    {"getQueuing", m_getQueuing}, {"GetQueuing", m_getQueuing},
     {"getAnimating", m_getAnimating}, {"GetAnimating", m_getAnimating},
     {"isAnimating", m_getAnimating}, {"IsAnimating", m_getAnimating},
     {"skip", m_skip}, {"Skip", m_skip},
@@ -571,7 +659,7 @@ int EmoteStub(lua_State *L) {
 
 int EmoteGc(lua_State *L) {
     EmoteProxy *p = static_cast<EmoteProxy *>(lua_touserdata(L, 1));
-    if (p) p->~EmoteProxy();  // std::string member
+    if (p) p->~EmoteProxy();  // string + weak instance token
     return 0;
 }
 
@@ -584,7 +672,7 @@ void PushEmoteProxy(lua_State *L, LuaEngine *engine, const std::string &id) {
     }
     lua_pop(L, 1);  // cached in the registry
     auto *p = static_cast<EmoteProxy *>(lua_newuserdata(L, sizeof(EmoteProxy)));
-    new (p) EmoteProxy{engine, id};
+    new (p) EmoteProxy{engine, id, engine->EmoteLifetime(id)};
     luaL_getmetatable(L, kEmoteMetaName);
     lua_setmetatable(L, -2);
 }
@@ -1159,7 +1247,7 @@ int LuaEngine::l_createEmoteLayer(lua_State *L) {
         self->compositor_->DeleteLayer(id);
         self->emotes_.erase(old);
     }
-    self->emotes_[id] = std::move(player);
+    self->emotes_[id] = {std::move(player), std::make_shared<char>()};
     PushEmoteProxy(L, self, id);
     return 1;
 }
@@ -1204,6 +1292,11 @@ int LuaEngine::l_getEmoteVersion(lua_State *L) {
 EmotePlayer *LuaEngine::FindEmote(const std::string &id) {
     const auto it = emotes_.find(id);
     return it == emotes_.end() ? nullptr : it->second.get();
+}
+
+std::weak_ptr<const void> LuaEngine::EmoteLifetime(const std::string &id) const {
+    const auto it = emotes_.find(id);
+    return it == emotes_.end() ? std::weak_ptr<const void>{} : it->second.lifetime;
 }
 
 bool LuaEngine::EmoteHitTest(const std::string &id, const std::string &label, double x, double y) {

@@ -22,9 +22,46 @@
 #include <iterator>
 #include <chrono>
 #include <algorithm>
+#include <new>
+
+// Scope allocation counting to the warmed CPU ordering path, not GL drivers,
+// text transforms, diagnostic formatting, or fixture construction.
+static thread_local bool g_count_order_allocations=false;
+static thread_local size_t g_order_allocations=0;
+void* operator new(std::size_t size) {
+    if(g_count_order_allocations)++g_order_allocations;
+    if(void* p=std::malloc(size?size:1))return p;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) {return ::operator new(size);}
+void operator delete(void* p) noexcept {std::free(p);}
+void operator delete[](void* p) noexcept {std::free(p);}
 
 static void Check(bool ok, const char* why) {
     if (!ok) { std::cerr << why << " GL=" << glGetError() << '\n'; std::exit(1); }
+}
+namespace artc {
+struct CompositorOrderRegression {
+    static void AllocationFree(const Compositor& c) {
+        std::vector<const Layer*> sorted;
+        Compositor::DrawOrderScratch scratch;
+        c.BuildDrawList(sorted,scratch);
+        for(const auto& a:scratch.entries) {
+            Check(!Compositor::DrawOrderLess(a,a),"draw comparator is irreflexive");
+            for(const auto& b:scratch.entries) {
+                if(a.id!=b.id)Check(Compositor::DrawOrderLess(a,b)!=Compositor::DrawOrderLess(b,a),
+                    "distinct draw keys are totally ordered");
+                for(const auto& d:scratch.entries)
+                    if(Compositor::DrawOrderLess(a,b) && Compositor::DrawOrderLess(b,d))
+                        Check(Compositor::DrawOrderLess(a,d),"draw comparator is transitive for mixed owner/effect members");
+            }
+        }
+        g_order_allocations=0;g_count_order_allocations=true;
+        for(int i=0;i<20;++i)c.BuildDrawList(sorted,scratch);
+        g_count_order_allocations=false;
+        Check(g_order_allocations==0,"warmed ordering, including every comparison, allocates no owning strings or scratch storage");
+    }
+};
 }
 #if defined(ARTC_TEST_CGL)
 // A drawable-less CGL context has no valid default framebuffer, so "screen"
@@ -601,6 +638,96 @@ int main() {
         p=At(2,2);Check(p[0]==0 && p[1]==0 && p[2]==0,"subtract blend clamps dst minus src");
         c.DeleteLayer("31");c.Draw();
     }
+    // General affine is a local opt-in, shared by pixels, inverse rectangle
+    // queries and ordinary (not mesh-deformed) stage-mask sources.
+    {
+        artc::Compositor affine;affine.Init(32,32);
+        const uint8_t asymmetric[]={255,0,0,255, 0,255,0,255,
+                                    0,0,255,255, 255,255,0,255};
+        Check(affine.SetPixels("a",asymmetric,2,2),"upload asymmetric affine quad");
+        glBindTexture(GL_TEXTURE_2D,affine.Layers().front().texture);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+        Check(affine.SetLayerAffine("a",8,0,4,8,2,2),"set sheared quad affine");
+        affine.Draw();
+        Check(At(7,5)[0]>240 && At(7,5)[1]<10 && At(7,5)[2]<10 &&
+              At(15,5)[1]>240 && At(15,5)[0]<10 &&
+              At(11,13)[2]>240 && At(11,13)[0]<10 &&
+              At(19,13)[0]>240 && At(19,13)[1]>240 && At(19,13)[2]<10,
+              "affine quad preserves asymmetric UV pixels and top-down direction");
+        Check(affine.HitLayers(8,6)==std::vector<std::string>{"a"} &&
+              affine.HitLayers(3,16).empty(),"HitLayers inverts the same sheared quad as GL drawing");
+        Check(affine.SetLayerAffine("a",-8,0,4,8,18,2),"set negative determinant affine");
+        affine.Draw();
+        Check(At(15,5)[0]>240 && At(15,5)[1]<10 && At(7,5)[1]>240 &&
+              affine.HitLayer(16,6)=="a","reflected affine keeps UV direction and inverse hits");
+        Check(affine.SetLayerAffine("a",0,0,4,8,2,2),"accept singular affine for GL");
+        affine.Draw();
+        Check(At(7,5)[0]==0 && affine.HitLayers(4,6).empty(),
+              "zero first column produces no area, not a spurious fallback quad");
+        affine.DeleteLayer("a");
+        const uint8_t alpha_source[]={255,255,255,255, 255,255,255,255,
+                                     255,255,255,0, 255,255,255,0};
+        Check(affine.SetPixels("mask",alpha_source,2,2),"upload asymmetric affine mask source");
+        glBindTexture(GL_TEXTURE_2D,affine.Layers().front().texture);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+        Check(affine.SetLayerAffine("mask",8,0,4,8,2,2),"set mask source affine");
+        const auto mask=affine.RenderStageMask(303,{"mask"});
+        Check(mask!=0,"render ordinary affine stage-mask source");affine.DeleteLayer("mask");
+        Check(affine.SetPixels("paint",red,1,1),"upload affine mask consumer");
+        affine.SetProps("paint",{{"w","32"},{"h","32"}});
+        affine.SetLayerStageMask("paint",mask);affine.Draw();
+        Check(At(7,5)[0]>240 && At(15,5)[0]>240 && At(11,13)[0]==0 &&
+              At(3,5)[0]==0 && At(25,5)[0]==0,
+              "ordinary affine mask source shares geometry and asymmetric top-down alpha direction");
+        affine.SetProps("paint",{{"intermediate_render","2"}});affine.Draw();
+        Check(At(7,5)[0]>240 && At(11,13)[0]==0,
+              "affine source stage mask stays top-down through an intermediate consumer");
+        affine.ReleaseGl();
+    }
+    {
+        using namespace emote_fixture;
+        artc::Compositor affine;affine.Init(32,32);
+        auto doc=Scene();
+        auto& icon=doc.root.object["source"].object["images"].object["icon"].object["face"];
+        const auto offset=doc.resources[icon.object["pixel"].resource].first;
+        const uint8_t asymmetric[]={255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,0,255};
+        std::copy(std::begin(asymmetric),std::end(asymmetric),doc.bytes.begin()+offset);
+        auto& layers=doc.root.object["object"].object["actor"].object["motion"].object["idle"].object["layer"];
+        layers=A({Node(0,"affine art",A({Key(0,2,O({{"src",S("src/images/face")},
+            {"angle",N(45)},{"zx",N(.5)}}))}))});
+        auto model=std::make_shared<artc::EmoteModel>();std::string error;
+        Check(model->Load(doc,error),error.c_str());artc::EmoteScene scene;
+        Check(scene.Load(model,error),error.c_str());
+        affine.SetProps("scene",{{"left","16"},{"top","16"},{"zoom","800"}});
+        Check(scene.Render(affine,"scene",0,{},error),error.c_str());
+        for(const auto& l:affine.Layers())if(l.texture) {
+            glBindTexture(GL_TEXTURE_2D,l.texture);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+        }
+        affine.Draw();
+        Check(At(16,10)[0]>240 && At(16,10)[1]<10 && At(18,16)[1]>240 && At(18,16)[0]<10 &&
+              At(13,16)[2]>240 && At(13,16)[0]<10 && At(16,21)[0]>240 && At(16,21)[1]>240,
+              "E-mote installs full 45-degree nonuniform affine with asymmetric pixel UVs");
+        Check(affine.HitLayer(18,16)=="scene.000001.000000" && scene.HitTest(affine,"scene","affine art",18,16),
+              "E-mote geometric hits and compositor inverse hits agree with GL affine art");
+        scene.Remove(affine,"scene");affine.DeleteLayer("scene");
+        layers=A({Node(1,"shape",A({Key(0,2,O({{"src",S("shape/rect")},
+            {"coord",A({N(20),N(20)})},{"opa",N(128)}}))}),A({
+            Node(0,"shape child",A({Key(0,2,O({{"src",S("src/images/face")},
+                {"coord",A({N(-1),N(-1)})}}))}))}))});
+        model=std::make_shared<artc::EmoteModel>();Check(model->Load(doc,error),error.c_str());
+        Check(scene.Load(model,error),error.c_str());Check(scene.Render(affine,"scene",0,{},error),error.c_str());
+        affine.Draw();
+        const auto child=At(18,18);
+        Check(child[0]+child[1]+child[2]>110 && child[0]+child[1]+child[2]<200 &&
+              affine.HitLayer(18.5,18.5)=="scene.000001.000001.000000" &&
+              scene.HitTest(affine,"scene","shape",20,20),
+              "shape geometry leaf leaves child absolute placement and opacity applied exactly once in GL");
+        affine.ReleaseGl();
+    }
     // E9: stencil composite stage mask — the mask layer's alpha clips the
     // masked part (RenderStageMask + SetLayerStageMask).
     {
@@ -617,6 +744,194 @@ int main() {
             "stage mask keeps the part inside the mask only");
         c.SetLayerStageMask("52",0);
         c.DeleteLayer("51");c.DeleteLayer("52");c.Draw();
+    }
+    {
+        artc::Compositor masks;
+        const uint8_t white[4]={255,255,255,255};
+        for(int cycle=0;cycle<2;++cycle) {
+            masks.Init(32,32);
+            // Reuse the keys after ReleaseGl, but move both coverage regions
+            // so stale mask contents cannot accidentally satisfy the checks.
+            const int ax=cycle?20:4, bx=cycle?4:20;
+            Check(masks.SetPixels("51",white,1,1),"independent mask A source");
+            masks.SetProps("51",{{"left",std::to_string(ax)},{"top","4"},{"w","8"},{"h","24"}});
+            const uint32_t mask_a=masks.RenderStageMask(101,{"51"});
+            Check(mask_a!=0,"render independent mask A");
+            masks.DeleteLayer("51");
+            Check(masks.SetPixels("61",red,1,1),"independent mask A consumer");
+            masks.SetProps("61",{{"w","32"},{"h","32"}});
+            masks.SetLayerStageMask("61",mask_a);masks.Draw();
+            Check(At(ax+2,6)[0]==255 && At(bx+2,22)[0]==0,
+                "mask A initially covers only its own region");
+
+            Check(masks.SetPixels("52",white,1,1),"independent mask B source");
+            masks.SetProps("52",{{"left",std::to_string(bx)},{"top","4"},{"w","8"},{"h","24"}});
+            const uint32_t mask_b=masks.RenderStageMask(202,{"52"});
+            Check(mask_b!=0 && mask_b!=mask_a,"different mask keys own distinct textures");
+            masks.DeleteLayer("52");
+            Check(masks.SetPixels("62",green,1,1),"independent mask B consumer");
+            masks.SetProps("62",{{"w","32"},{"h","32"}});
+            masks.SetLayerStageMask("62",mask_b);masks.Draw();
+            const auto a=At(ax+2,6), b=At(bx+2,22), gap=At(16,16);
+            Check(a[0]==255 && a[1]==0 && b[0]==0 && b[1]==255 &&
+                  gap[0]==0 && gap[1]==0,
+                "creating mask B preserves mask A coverage for distinct same-frame consumers");
+            Check(At(ax+2,22)[0]==255 && At(ax+2,22)[1]==0 &&
+                  At(bx+2,6)[0]==0 && At(bx+2,6)[1]==255,
+                "rebuilt masks never retain coverage from before GL release");
+            masks.ReleaseGl();
+            Check(!glIsTexture(mask_a) && !glIsTexture(mask_b),
+                "GL release deletes both independently keyed mask textures");
+        }
+        // Unlike the symmetric coverage above, this catches stage-space Y
+        // inversion without an already-red background hiding the error.
+        masks.Init(32,32);
+        Check(masks.SetPixels("51",white,1,1),"asymmetric stage mask source");
+        masks.SetProps("51",{{"left","4"},{"top","4"},{"w","8"},{"h","8"}});
+        const uint32_t top_mask=masks.RenderStageMask(101,{"51"});
+        Check(top_mask!=0,"render asymmetric stage mask");masks.DeleteLayer("51");
+        Check(masks.SetPixels("61",red,1,1),"asymmetric stage mask consumer");
+        masks.SetProps("61",{{"w","32"},{"h","32"}});
+        masks.SetLayerStageMask("61",top_mask);masks.Draw();
+        const auto top=At(6,6), bottom=At(6,25);
+        if(top[0]!=255 || bottom[0]!=0)
+            std::cerr << "stage mask top red=" << int(top[0]) << " bottom red=" << int(bottom[0]) << '\n';
+        Check(top[0]==255 && bottom[0]==0,"stage mask coverage keeps top-down stage coordinates");
+        masks.SetProps("61",{{"intermediate_render","2"}});masks.Draw();
+        Check(At(6,6)[0]==255 && At(6,25)[0]==0,
+            "explicit intermediate stage mask keeps top-down stage coordinates");
+        // Nest the masked layer so End composites into a top-down parent FBO,
+        // rather than directly into the ordinary scene FBO.
+        masks.RenameLayer("61","60.1");
+        masks.SetProps("60",{{"intermediate_render","2"}});masks.Draw();
+        Check(At(6,6)[0]==255 && At(6,25)[0]==0 && At(20,6)[0]==0,
+            "nested intermediate stage mask keeps top-down stage coordinates");
+        masks.ReleaseGl();
+    }
+    // Warped E9 mask sources use the same triangle positions and explicit UVs
+    // as the ordinary leaf pass, not the layer's rectangular texture bounds.
+    {
+        artc::Compositor warped;warped.Init(32,32);
+        const uint8_t alpha_uv[]={255,255,255,0, 255,255,255,255,
+                                  255,255,255,255, 255,255,255,128};
+        const std::vector<float> triangle={0,0,1,0, 24,0,0,0, 0,24,1,1};
+        Check(warped.SetPixels("shape",alpha_uv,2,2),"upload warped mask asymmetric alpha");
+        warped.SetProps("shape",{{"left","4"},{"top","4"},{"w","24"},{"h","24"}});
+        warped.SetLayerMesh("shape",triangle);
+        glBindTexture(GL_TEXTURE_2D,warped.Layers().front().texture);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+        warped.Draw();
+        Check(At(7,7)[0]==255 && At(21,7)[0]==0 && abs(At(7,21)[0]-128)<=1 && At(23,23)[0]==0,
+            "synthetic mesh leaf establishes nonrectangular geometry and asymmetric UV alpha");
+        // Keep the existing source-alpha policy: positive layer opacity gates
+        // eligibility but is not multiplied into the sampled texture alpha.
+        warped.SetProps("shape",{{"alpha","64"},{"intermediate_render","2"},{"clip","0,0,1,1"}});
+        const auto mask=warped.RenderStageMask(401,{"shape"});
+        Check(mask!=0,"render warped triangle stage mask");
+        // The source's own mask/effect must not be recursively evaluated, even
+        // when it names the very target being rebuilt (texture feedback).
+        warped.SetLayerStageMask("shape",mask);
+        Check(warped.RenderStageMask(401,{"shape"})==mask,"rebuild warped mask without source-effect feedback");
+        warped.DeleteLayer("shape");
+        Check(warped.SetPixels("paint",red,1,1),"upload warped mask consumer");
+        warped.SetProps("paint",{{"w","32"},{"h","32"}});
+        warped.SetLayerStageMask("paint",mask);warped.Draw();
+        auto check_warped=[&]() {
+            Check(At(7,7)[0]==255 && At(21,7)[0]==0 && abs(At(7,21)[0]-128)<=1 &&
+                  At(23,23)[0]==0 && At(7,28)[0]==0,
+                "warped stage-mask consumer matches triangle geometry, explicit UV alpha and top-down stage Y");
+        };
+        check_warped();
+        warped.SetProps("paint",{{"intermediate_render","2"}});warped.Draw();check_warped();
+        warped.RenameLayer("paint","group.paint");
+        warped.SetProps("group",{{"intermediate_render","2"}});warped.Draw();check_warped();
+        warped.ReleaseGl();
+        Check(!glIsTexture(mask),"release warped mask GL target");
+    }
+    {
+        artc::Compositor warped;warped.Init(32,32);
+        const uint8_t alpha_uv[]={255,255,255,0, 255,255,255,255,
+                                  255,255,255,255, 255,255,255,128};
+        Check(warped.SetPixels("parent.shape",alpha_uv,2,2),"upload full-affine warped mask source");
+        warped.SetProps("parent.shape",{{"w","24"},{"h","24"}});
+        warped.SetLayerMesh("parent.shape",{0,0,1,0, 24,0,0,0, 0,24,1,1});
+        Check(warped.SetLayerAffine("parent.shape",1,.25f,.5f,.75f,2,2),"install warped mask full affine");
+        warped.SetProps("parent",{{"alpha","128"}});
+        Check(warped.SetLayerAffine("parent",1,.25f,0,1,1,1),"install warped mask ancestor affine");
+        for(const auto& layer:warped.Layers())if(layer.texture) {
+            glBindTexture(GL_TEXTURE_2D,layer.texture);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+        }
+        const auto mask=warped.RenderStageMask(402,{"parent.shape"});
+        Check(mask!=0,"render full-affine warped mask");
+        warped.DeleteLayer("parent.shape");warped.DeleteLayer("parent");
+        Check(warped.SetPixels("paint",red,1,1),"upload full-affine warped mask consumer");
+        warped.SetProps("paint",{{"w","32"},{"h","32"}});
+        warped.SetLayerStageMask("paint",mask);warped.Draw();
+        Check(At(8,8)[0]==255 && At(22,15)[0]==0 && abs(At(15,20)[0]-128)<=1 && At(30,28)[0]==0,
+            "warped mask composes full local and ancestor affine without reducing to a quad or TRS");
+        warped.ReleaseGl();
+    }
+    {
+        artc::Compositor warped;
+        const uint8_t white[4]={255,255,255,255};
+        for(int cycle=0;cycle<2;++cycle) {
+            warped.Init(32,32);
+            const int y=cycle?20:2;
+            uint32_t targets[2]={};
+            for(int i=0;i<2;++i) {
+                const int x=i?20:2;
+                Check(warped.SetPixels("shape",white,1,1),"upload independently keyed warped mask source");
+                warped.SetProps("shape",{{"left",std::to_string(x)},{"top",std::to_string(y)},{"w","8"},{"h","8"}});
+                warped.SetLayerMesh("shape",{0,0,0,0, 8,0,1,0, 0,8,0,1});
+                targets[i]=warped.RenderStageMask(410+i,{"shape"});
+                Check(targets[i]!=0 && (!i || targets[i]!=targets[0]),"warped mask keys have independent targets");
+                warped.DeleteLayer("shape");
+                const std::string id=i?"paintB":"paintA";
+                Check(warped.SetPixels(id,i?green:red,1,1),"upload independently keyed warped mask consumer");
+                warped.SetProps(id,{{"w","32"},{"h","32"}});
+                warped.SetLayerStageMask(id,targets[i]);
+            }
+            warped.Draw();
+            Check(At(3,y+1)[0]==255 && At(3,y+1)[1]==0 && At(21,y+1)[1]==255 && At(21,y+1)[0]==0 &&
+                  At(8,y+6)[0]==0 && At(26,y+6)[1]==0 && At(3,cycle?3:21)[0]==0,
+                "independent warped mask consumers preserve triangle coverage across key creation and GL rebuild");
+            warped.ReleaseGl();
+            Check(!glIsTexture(targets[0]) && !glIsTexture(targets[1]),"release every independently keyed warped mask");
+        }
+    }
+    {
+        artc::Compositor bounds;bounds.Init(32,32);
+        const uint8_t white[4]={255,255,255,255};
+        Check(bounds.SetPixels("shape",white,1,1),"upload mask mesh boundary source");
+        bounds.SetProps("shape",{{"left","4"},{"top","4"},{"w","8"},{"h","8"}});
+        Check(bounds.SetPixels("paint",red,1,1),"upload mask mesh boundary consumer");
+        bounds.SetProps("paint",{{"w","32"},{"h","32"}});
+        const auto target=bounds.RenderStageMask(420,{"shape"});
+        Check(target!=0,"create boundary mask target");
+        bounds.SetLayerStageMask("paint",target);
+        auto check_mesh=[&](const std::vector<float>& mesh,bool rendered,int inside,int corner,const char* why) {
+            bounds.SetProps("shape",{{"visible","1"}});
+            bounds.SetLayerMesh("shape",mesh);
+            Check(bounds.RenderStageMask(420,{"shape"})==(rendered?target:0),why);
+            // Hide only after capturing alpha so the raw source never paints
+            // over the consumer, and invalid vertices never enter Draw().
+            bounds.SetProps("shape",{{"visible","0"}});bounds.Draw();
+            Check(At(5,5)[0]==inside && At(10,10)[0]==corner,why);
+        };
+        check_mesh({0,0,0,0, 8,0,1,0, 0,8,0,1},true,255,0,"boundary mesh triangle clips its far corner");
+        check_mesh({},true,255,255,"empty SetLayerMesh restores the quad mask");
+        check_mesh({0,0,0},true,255,255,"misaligned mesh size follows the leaf quad fallback");
+        check_mesh({0,0,0,0},true,0,0,"incomplete triangle list draws no accidental quad");
+        check_mesh({0,0,0,0, 8,0,1,0, 0,8,0,1, 8,8,1,1},true,255,0,
+            "complete xyuv vertices with an incomplete trailing triangle match GL_TRIANGLES");
+        check_mesh({0,0,0,0, INFINITY,0,1,0, 0,8,0,1},false,0,0,
+            "nonfinite mask mesh coordinates safely leave cleared coverage");
+        check_mesh({0,0,NAN,0, 8,0,1,0, 0,8,0,1},false,0,0,
+            "nonfinite mask mesh UVs safely leave cleared coverage");
+        bounds.ReleaseGl();
     }
     c.SetProps("9",{{"grayscale","0"}});
     Check(messages.DoString("e:tag{'lyshader',id='tint',file='filter.glsl'};e:tag{'lyshader',id='uv',file='uv.glsl'}",
@@ -664,6 +979,379 @@ int main() {
         "mask path alias"),"mask tag resolves the same resource aliases as image loading");c.Draw();
     Check(At(1,1)[0]==255 && At(6,1)[0]==0 && c.Layers().back().effect.mask=="mask.tga","resolved mask retains its clipping result");
     c.ReleaseGl();c.Init(32,32);
+    {
+        artc::Compositor order;order.Init(32,32);order.SetPackManager(&packs);
+        auto fill=[&](const std::string& id,const uint8_t* color) {
+            Check(order.SetPixels(id,color,1,1),"synthetic ordering texture");
+            order.SetProps(id,{{"w","32"},{"h","32"}});
+        };
+        const std::array<std::string,3> ids={"30.000001.000000",
+            "30.000001.000001.000000","30.000001.000000.5"};
+        // The previous pairwise comparator formed A<X, X<B, B<A for these
+        // mixed flagged/unflagged layers. Every insertion permutation must now
+        // have the same deterministic result (including the ordinary member).
+        std::array<int,3> permutation={0,1,2};std::string expected;
+        do {
+            order.DeleteLayer("30");
+            for(int i:permutation) {
+                fill(ids[size_t(i)],i==0?red:(i==1?green:blue));
+                if(i<2) {
+                    order.SetLayerEmoteTree(ids[size_t(i)],true);
+                    order.SetLayerEmoteOrder(ids[size_t(i)],"30",-1);
+                }
+            }
+            const auto description=order.DescribeDrawList(20);
+            if(expected.empty())expected=description;
+            Check(description==expected,"mixed E-mote/ordinary ordering is insertion-independent across all six permutations");
+            const auto a=description.find(ids[0]+"["),b=description.find(ids[1]+"["),x=description.find(ids[2]+"[");
+            Check(x<b && b<a,"virtual postorder keys replace the mixed-layer comparison cycle");
+            order.Draw();Check(Pixel()[0]==255 && Pixel()[1]==0,
+                "same-node child components are behind the node's own art");
+        } while(std::next_permutation(permutation.begin(),permutation.end()));
+        artc::CompositorOrderRegression::AllocationFree(order);
+        // Runtime Z is the primary local channel; explicit paint is retained
+        // only as a same-Z extension. Finite keys keep strict ordering valid.
+        const auto before_invalid=order.DescribeDrawList(20);const auto invalid_rev=order.Revision();
+        Check(!order.SetLayerEmoteOrder(ids[0],"30",0,INFINITY) &&
+              !order.SetLayerEmoteOrder(ids[0],"30",0,std::nan("")) &&
+              order.Revision()==invalid_rev && order.DescribeDrawList(20)==before_invalid,
+              "non-finite effective Z rejects atomically without invalidating total-order keys");
+        order.SetLayerEmoteOrder(ids[0],"30",0,-5);order.SetLayerPaint(ids[0],100);
+        order.SetLayerEmoteOrder(ids[1],"30",1,5);order.SetLayerPaint(ids[1],-100);
+        auto z_description=order.DescribeDrawList(20);
+        Check(z_description.find(ids[0]+"[")<z_description.find(ids[1]+"["),
+              "effective Z precedes explicit paint and compatibility rank within a boundary");
+        const auto changed_rev=order.Revision();
+        order.SetLayerEmoteOrder(ids[0],"30",0,-5);
+        Check(order.Revision()==changed_rev,"publishing identical effective Z does not bump revision");
+        order.SetLayerEmoteOrder(ids[0],"30",0,8);
+        Check(order.Revision()>changed_rev,"a Z-only change bumps redraw revision");
+        artc::CompositorOrderRegression::AllocationFree(order);
+        order.DeleteLayer("30");
+        fill("1",blue);
+        for(const std::string owner:{"30","40"}) {
+            fill(owner+".000001.000000",red);
+            fill(owner+".000002.000000",green);
+            order.SetLayerEmoteOrder(owner+".000001.000000",owner,0);
+            order.SetLayerEmoteOrder(owner+".000002.000000",owner,1);
+            order.SetLayerPaint(owner+".000002.000000",-3);
+        }
+        auto description=order.DescribeDrawList(20);
+        Check(description.find(" 1[")<description.find(" 30.000002.000000[") &&
+              description.find(" 30.000002.000000[")<description.find(" 30.000001.000000[") &&
+              description.find(" 30.000001.000000[")<description.find(" 40.000002.000000[") &&
+              description.find(" 40.000002.000000[")<description.find(" 40.000001.000000["),
+              "background then two owner blocks, with local paint but no cross-owner interleaving");
+        // Use an uncovered negative-paint part: it must not disappear behind
+        // the background or escape its owner/ancestor effects.
+        order.DeleteLayer("40");order.DeleteLayer("30.000001.000000");
+        order.SetProps("30",{{"grayscale","1"}});order.Draw();
+        Check(abs(Pixel()[0]-150)<=1 && Pixel()[0]==Pixel()[1] && Pixel()[1]==Pixel()[2],
+            "negative-paint content remains above background and inside parent grayscale");
+        Check(order.LoadShader("tint","filter.glsl"),"load owner sorting shader fixture");
+        order.SetProps("30",{{"shader","tint"},{"red","1"},{"green","0.5"},{"blue","1"}});order.Draw();
+        Check(Pixel()[0]==0 && abs(Pixel()[1]-128)<=1 && Pixel()[2]==0,
+            "negative-paint content remains inside the parent custom shader");
+        order.SetProps("30",{{"shader",""}});
+        order.SetProps("30",{{"intermediate_render","2"},{"alpha","128"},{"clip","0,0,16,16"}});order.Draw();
+        Check(abs(At(4,4)[0]-75)<=2 && abs(At(4,4)[2]-202)<=2 && At(24,24)[2]==255 && At(24,24)[0]==0,
+            "negative-paint content retains parent intermediate opacity and local clip coverage");
+        // A nested real effect is an indivisible boundary, even if one child
+        // asks to paint before both its group and its sibling group.
+        order.SetProps("30",{{"grayscale","0"},{"alpha","255"},{"clip","0,0,32,32"}});
+        order.DeleteLayer("30.000002.000000");
+        order.SetProps("30.1",{{"grayscale","1"}});
+        fill("30.1.1",green);order.SetLayerEmoteOrder("30.1.1","30",2);order.SetLayerPaint("30.1.1",-9);
+        fill("30.2",red);order.SetLayerEmoteOrder("30.2","30",3);order.Draw();
+        description=order.DescribeDrawList(20);
+        Check(description.find(" 30.2[")<description.find(" 30.1.1[") && abs(Pixel()[0]-150)<=1 && Pixel()[0]==Pixel()[1],
+            "nested effect descendants stay with their group instead of sorting out through negative paint");
+        artc::CompositorOrderRegression::AllocationFree(order);
+        // Repeat the owner/effect invariants with actual Z instead of paint.
+        order.DeleteLayer("30");order.DeleteLayer("40");
+        fill("30.1",green);order.SetLayerEmoteOrder("30.1","30",0,-100);
+        fill("40.1",red);order.SetLayerEmoteOrder("40.1","40",0,-1000);
+        order.Draw();description=order.DescribeDrawList(20);
+        Check(Pixel()[0]==255 && description.find(" 30.1[")<description.find(" 40.1["),
+              "two owner-local Z domains remain external-ID blocks instead of globally interleaving");
+        order.DeleteLayer("40");order.SetProps("30",{{"grayscale","1"}});order.Draw();
+        Check(abs(Pixel()[0]-150)<=1 && Pixel()[0]==Pixel()[1] && Pixel()[1]==Pixel()[2],
+              "negative Z stays above ordinary background and inside owner grayscale");
+        order.SetProps("30",{{"shader","tint"},{"red","1"},{"green","0.5"},{"blue","1"}});order.Draw();
+        Check(Pixel()[0]==0 && abs(Pixel()[1]-128)<=1 && Pixel()[2]==0,
+              "negative Z remains in owner custom shader");
+        order.SetProps("30",{{"shader",""},{"intermediate_render","2"},{"alpha","128"},{"clip","0,0,16,16"}});order.Draw();
+        Check(abs(At(4,4)[0]-75)<=2 && abs(At(4,4)[2]-202)<=2 && At(24,24)[2]==255 && At(24,24)[0]==0,
+              "negative Z retains owner intermediate opacity and local clip");
+        order.DeleteLayer("30");
+        order.SetProps("30.1",{{"grayscale","1"}});
+        fill("30.1.1",green);order.SetLayerEmoteOrder("30.1.1","30",0,-100);
+        fill("30.2",red);order.SetLayerEmoteOrder("30.2","30",1,-5);
+        order.Draw();description=order.DescribeDrawList(20);
+        Check(description.find(" 30.2[")<description.find(" 30.1.1[") && abs(Pixel()[0]-150)<=1,
+              "negative descendant Z cannot leave the enclosing indivisible nested effect group");
+        artc::CompositorOrderRegression::AllocationFree(order);
+        // An effect may also live above the scene owner. Both owner blocks and
+        // ordinary siblings must still be enclosed by that pre-existing group.
+        order.DeleteLayer("30");
+        order.SetProps("30",{{"grayscale","1"},{"intermediate_render","2"}});
+        fill("30.10.1",green);order.SetLayerEmoteOrder("30.10.1","30.10",0);order.SetLayerPaint("30.10.1",-9);
+        fill("30.20.1",red);order.SetLayerEmoteOrder("30.20.1","30.20",0);order.SetLayerPaint("30.20.1",-2);
+        order.Draw();Check(abs(Pixel()[0]-76)<=1 && Pixel()[0]==Pixel()[1] && Pixel()[1]==Pixel()[2],
+            "common ancestor effect encloses both external owner blocks with negative paint");
+        order.SetLayerEmoteOrder("30.10.1","30.10",0,1000);
+        order.SetLayerEmoteOrder("30.20.1","30.20",0,-1000);
+        order.Draw();Check(abs(Pixel()[0]-76)<=1 && Pixel()[0]==Pixel()[1] && Pixel()[1]==Pixel()[2],
+            "common ancestor effect still encloses both owner blocks with opposite runtime Z");
+        artc::CompositorOrderRegression::AllocationFree(order);
+        // Ordinary UI keeps ID ordering and message_overlay takes precedence;
+        // stale/local paint metadata cannot reorder layers outside an owner.
+        order.DeleteLayer("30");order.DeleteLayer("1");
+        fill("500.d.1",red);fill("500.0",green);fill("1.80",blue);
+        order.SetLayerPaint("500.0",-9);order.SetLayerPaint("1.80",9);
+        description=order.DescribeDrawList(20);
+        Check(description.find(" 1.80[")<description.find(" 500.0[") &&
+              description.find(" 500.0[")<description.find(" 500.d.1["),"ordinary UI preserves its original ID order");
+        order.SetMessageLayered("1.80",false);order.Draw();
+        Check(Pixel()[2]==255,"message overlay remains above numeric UI regardless of paint");
+        order.ReleaseGl();
+    }
+    {
+        artc::Compositor order;order.Init(32,32);
+        auto fill=[&](const std::string& id,const uint8_t* color) {
+            Check(order.SetPixels(id,color,1,1),"owner lifecycle synthetic texture");
+            order.SetProps(id,{{"w","32"},{"h","32"}});
+        };
+        auto layer=[&](const std::string& id)->const artc::Layer& {
+            for(const auto& l:order.Layers())if(l.id==id)return l;
+            Check(false,"owner lifecycle resident layer exists");std::abort();
+        };
+        fill("30.1",red);fill("30.2",green);
+        Check(order.SetLayerEmoteOrder("30.1","30",1) && order.SetLayerEmoteOrder("30.2","30",0),
+            "register disjoint owner members");
+        order.SetLayerEmoteOrder("30.1","30",1,8);
+        order.SetLayerEmoteOrder("30.2","30",0,-8);
+        Check(order.RenameLayer("30","40"),"rename complete owner subtree");
+        Check(layer("40.1").effect.emote_owner=="40" && layer("40.2").effect.emote_owner=="40" &&
+              layer("40.1").effect.emote_order==1 && layer("40.2").effect.emote_order==0 &&
+              layer("40.1").effect.emote_z==8 && layer("40.2").effect.emote_z==-8,
+            "whole-owner rename maps owner metadata while retaining local ranks");
+        order.Draw();Check(Pixel()[0]==255 && order.HitLayer(8,8)=="40.1" && order.HitLayers(8,8).front()=="40.1",
+            "renamed owner preserves pixels and both hit-query priority orders");
+        fill("30.1",blue);fill("30.2",green);order.SetLayerPaint("30.1",9);
+        auto description=order.DescribeDrawList(20);
+        Check(description.find(" 30.1[")<description.find(" 30.2["),"old owner ID reuse has no ghost registration affecting ordinary layers");
+        Check(order.SetLayerEmoteOrder("30.1","30.1",0),"old owner ID can be reused by a nested disjoint owner");
+        order.DeleteLayer("30");
+        Check(order.RenameLayer("40.1","50.1"),"move a member out of its owner");
+        Check(layer("50.1").effect.emote_owner.empty() && layer("50.1").effect.emote_order==-1 &&
+               !layer("50.1").effect.emote_tree && layer("50.1").effect.emote_z==0,
+               "moved-out member is unregistered and loses foreign Z");
+        order.SetLayerPaint("40.2",-9);
+        Check(order.RenameLayer("40.2","50.2"),"move last member out of its owner");
+        Check(layer("50.2").effect.emote_owner.empty() && layer("50.2").effect.emote_order==-1 &&
+               layer("50.2").effect.paint==0 && layer("50.2").effect.emote_z==0,
+               "move out clears source owner paint, rank and Z");
+        fill("40.1",green);Check(order.SetLayerEmoteOrder("40.1","40.1",0),
+            "moving final member removes source owner registration");
+        order.DeleteLayer("40");
+        fill("60.1",green);Check(order.SetLayerEmoteOrder("60.1","60",0),"register destination owner");
+        Check(order.SetLayerEmoteOrder("50.1","50",7),"register reparent source");order.SetLayerPaint("50.1",-9);
+        Check(order.RenameLayer("50.1","60.2"),"reparent single member into different owner");
+        Check(layer("60.2").effect.emote_owner.empty() && layer("60.2").effect.emote_order==-1 &&
+              layer("60.2").effect.paint==0,"destination must not inherit foreign owner rank or paint");
+        Check(order.SetLayerEmoteOrder("60.2","60",-1),"reparented member can explicitly register destination fallback rank");
+        order.Draw();Check(Pixel()[0]==255 && order.HitLayer(8,8)=="60.2","unranked reparent uses destination fallback order");
+        Check(order.RenameLayer("60","40.1") && layer("40.1.1").effect.emote_owner=="40.1" &&
+              layer("40.1.2").effect.emote_owner=="40.1",
+            "owner can move into an unregistered destination subtree");
+        // Reset for atomic owner-conflict rejection, including equal-owner merge.
+        order.DeleteLayer("40");order.DeleteLayer("60");order.DeleteLayer("50");
+        fill("30.1",red);fill("40.1",green);
+        Check(order.SetLayerEmoteOrder("30.1","30",0) && order.SetLayerEmoteOrder("40.1","40",0),"two lifecycle owners");
+        const auto before=order.DescribeDrawList(20);const auto rev=order.Revision();
+        Check(!order.RenameLayer("30","40.2") && !order.RenameLayer("30","40") &&
+              order.DescribeDrawList(20)==before && order.Revision()==rev,
+            "whole-owner rename rejects nested-owner and equal-owner merges atomically");
+        order.DeleteLayer("30");order.DeleteLayer("40");
+        fill("30.9",red);fill("30.1.a",green);fill("30.1.b",blue);
+        Check(order.SetLayerEmoteOrder("30.9","30",1),"register outer owner");
+        const auto outer_revision=order.Revision();
+        Check(!order.SetLayerEmoteOrder("30.1.a","30.1",0) &&
+              !order.SetLayerEmoteOrder("30.1.b","30.1",2) && order.Revision()==outer_revision &&
+              layer("30.1.a").effect.emote_owner.empty() && layer("30.1.b").effect.emote_owner.empty(),
+            "nested owner registrations are rejected without mutation, not merged across local ranks");
+        Check(order.SetLayerEmoteOrder("30.9","",99),"explicit unregister outer owner");
+        Check(order.SetLayerEmoteOrder("30.1.a","30.1",0) && order.SetLayerEmoteOrder("30.1.b","30.1",2),
+            "nested owner may register after outer owner is unregistered");
+        const auto nested_revision=order.Revision();
+        Check(!order.SetLayerEmoteOrder("30.9","30",1) && order.Revision()==nested_revision,
+            "overlap is rejected in reverse registration order too");
+        description=order.DescribeDrawList(20);
+        Check(description.find(" 30.1.a[")<description.find(" 30.1.b[") &&
+              description.find(" 30.1.b[")<description.find(" 30.9["),"accepted nested scene stays contiguous beside ordinary outer sibling");
+        order.DeleteLayer("30.1");
+        Check(order.SetLayerEmoteOrder("30.9","30",1),"deleting last nested registration releases overlapping owner namespace");
+        order.DeleteLayer("30");fill("30.1",red);fill("30.2",green);order.SetLayerPaint("30.1",9);
+        description=order.DescribeDrawList(20);
+        Check(description.find(" 30.1[")<description.find(" 30.2["),"delete then ordinary ID reuse has no ghost owner");
+        Check(!order.SetLayerEmoteOrder("missing.1","missing",0) &&
+              !order.SetLayerEmoteOrder("30.1","40",0),"absent and nonmember registration rejected");
+        order.DeleteLayer("30");
+        fill("30.1",red);fill("40.1",green);fill("30.2",blue);
+        Check(order.SetLayerEmoteOrder("30.1","30",0) && order.SetLayerEmoteOrder("40.1","40",0),
+            "ordinary attachment migration source and destination owners");
+        order.SetLayerPaint("30.2",-9);order.SetLayerEmoteTree("30.2",true);
+        Check(order.RenameLayer("30.2","40.2") && layer("40.2").effect.emote_owner.empty() &&
+              layer("40.2").effect.paint==0 && layer("40.2").effect.emote_order==-1 &&
+              !layer("40.2").effect.emote_tree,
+            "ordinary cross-owner attachment clears source-local hint, rank and marker");
+        order.Draw();Check(Pixel()[2]==255 && order.HitLayer(8,8)=="40.2",
+            "ordinary cross-owner attachment does not bring negative paint into destination");
+        order.SetLayerPaint("40.2",-9);order.SetLayerEmoteTree("40.2",true);
+        Check(order.RenameLayer("40.2","50.2") && layer("50.2").effect.paint==0 &&
+              layer("50.2").effect.emote_order==-1 && !layer("50.2").effect.emote_tree,
+            "ordinary attachment moved out of all owners clears source-local metadata");
+        Check(order.RenameLayer("50.2","40.2"),"return ordinary attachment to destination owner");
+        order.SetLayerPaint("40.2",-9);
+        Check(order.RenameLayer("40.2","40.3") && layer("40.3").effect.paint==-9,
+            "ordinary attachment rename within one owner retains its local hint");
+        order.Draw();Check(Pixel()[1]==255 && order.HitLayer(8,8)=="40.1",
+            "same-owner ordinary attachment keeps negative paint behind registered art");
+        Check(order.RenameLayer("40","60") && layer("60.3").effect.emote_owner.empty() &&
+              layer("60.3").effect.paint==-9 && layer("60.1").effect.emote_owner=="60",
+            "whole-owner rename preserves ordinary attachment hints alongside mapped registrations");
+        order.Draw();Check(Pixel()[1]==255 && order.HitLayer(8,8)=="60.1",
+            "whole-owner move preserves ordinary attachment relative paint order");
+        order.DeleteLayer("60");order.DeleteLayer("30");
+        fill("30.1",red);fill("30.2",green);order.SetLayerPaint("30.1",9);
+        // Defensive source filtering: malformed legacy/stale metadata outside
+        // its declared subtree must not establish a phantom owner or rank.
+        fill("70.1",blue);
+        auto& stale=const_cast<artc::Layer&>(layer("70.1"));
+        stale.effect.emote_owner="30";stale.effect.emote_order=0;
+        description=order.DescribeDrawList(20);
+        Check(description.find(" 30.1[")<description.find(" 30.2[") &&
+              order.SetLayerEmoteOrder("30.1","30.1",0),
+            "only valid resident registrations may supply owner roots");
+        order.DeleteLayer("30");order.DeleteLayer("70");
+        fill("20.30.1",red);fill("20.30.2",green);
+        Check(order.SetLayerEmoteOrder("20.30.1","20.30",1) &&
+              order.SetLayerEmoteOrder("20.30.2","20.30",0) && order.RenameLayer("20","50") &&
+              layer("50.30.1").effect.emote_owner=="50.30" &&
+              layer("50.30.2").effect.emote_owner=="50.30",
+            "renaming an owner's ancestor maps owner metadata as well as layer IDs");
+        order.Draw();Check(Pixel()[0]==255 && order.HitLayer(8,8)=="50.30.1",
+            "ancestor rename preserves owner-local paint and hit order");
+        artc::CompositorOrderRegression::AllocationFree(order);
+        order.ReleaseGl();
+    }
+    {
+        using namespace emote_fixture;
+        auto doc=Scene();
+        auto& motion=doc.root.object["object"].object["actor"].object["motion"].object["idle"];
+        motion.object["layer"]=A({
+            Node(0,"body",A({Key(0,2,O({{"src",S("src/images/body")},{"coord",A({N(8),N(8),N(0)})}}))})),
+            Node(0,"face",A({Key(0,2,O({{"src",S("src/images/face")},{"coord",A({N(8),N(8),N(0)})}}))}))});
+        motion.object["priority"]=A({O({{"time",N(0)},{"content",A({N(0),N(1)})}}),
+            O({{"time",N(5)},{"content",A({N(1),N(0)})}})});
+        auto model=std::make_shared<artc::EmoteModel>();std::string error;
+        Check(model->Load(doc,error),error.c_str());artc::EmoteScene scene;
+        Check(scene.Load(model,error),error.c_str());
+        Check(scene.Render(c,"30",0,{},error),error.c_str());c.Draw();
+        Check(At(8,8)[0]==255 && At(8,8)[1]==0,"motion.priority controls actual rendered order, not only Evaluate vector order");
+        Check(c.HitLayer(8,8)=="30.000001.000000" && c.HitLayers(8,8).front()=="30.000001.000000",
+            "both hit queries follow first priority keyframe's visible top part");
+        const auto first=c.DescribeDrawList(20);
+        Check(scene.Render(c,"30",5,{},error),error.c_str());c.Draw();
+        Check(At(8,8)[0]==0 && At(8,8)[1]==255 && c.DescribeDrawList(20)!=first,
+            "priority keyframe changes compositor order without changing original-index layer IDs");
+        Check(c.HitLayer(8,8)=="30.000002.000000" && c.HitLayers(8,8).front()=="30.000002.000000",
+            "both hit queries follow changed motion.priority instead of original-index ID order");
+        Check(c.GetLayerInfo("30.000001.000000").found && c.GetLayerInfo("30.000002.000000").found,
+            "priority preserves layer identity across frames");
+        c.ReleaseGl();c.Init(32,32);
+    }
+    {
+        using namespace emote_fixture;
+        // Entirely synthetic overlapping red/green icons; no asset labels or
+        // atlas metadata may stand in for the sampled runtime coord[2].
+        auto picture=[](const char* label,const char* src,double z) {
+            return Node(0,label,A({Key(0,2,O({{"src",S(src)},
+                {"coord",A({N(0),N(0),N(z)})}}))}));
+        };
+        auto run=[&](artc::PsbValue nodes,bool green_top,const char* message) {
+            auto doc=Scene();auto& motion=doc.root.object["object"].object["actor"].object["motion"].object["idle"];
+            motion.object["layer"]=std::move(nodes);
+            doc.root.object["object"].object["actor"].object["motion"].object["inner"]=O({
+                {"layer",A({picture("nested green","src/images/face",-2)})},
+                {"lastTime",N(20)},{"loopTime",N(-1)}});
+            auto model=std::make_shared<artc::EmoteModel>();std::string error;
+            Check(model->Load(doc,error),error.c_str());artc::EmoteScene scene;
+            Check(scene.Load(model,error),error.c_str());
+            c.SetProps("30",{{"left","8"},{"top","8"}});
+            Check(scene.Render(c,"30",0,{},error),error.c_str());c.Draw();
+            Check(At(8,8)[green_top?1:0]==255 && At(8,8)[green_top?0:1]==0,message);
+            artc::CompositorOrderRegression::AllocationFree(c);
+            c.ReleaseGl();c.Init(32,32);
+        };
+        run(A({picture("green","src/images/face",5),picture("red","src/images/body",-2)}),true,
+            "sampled positive/negative Z overrides sibling source-index order on GPU");
+        for(double z:{-3.0,3.0,0.0}) {
+            auto parent=picture("parent art","src/images/body",4);
+            parent.object["children"]=A({picture("child art","src/images/face",z)});
+            run(A({parent}),z>0,"same-node parent art and child +/-Z sort by accumulated Z, same Z retains compatibility tie");
+        }
+        auto high=Node(2,"positive parent",A({Key(0,2,O({{"src",S("layout")},
+            {"coord",A({N(0),N(0),N(10)})}}))}),A({picture("green","src/images/face",-1)}));
+        auto low=Node(2,"negative parent",A({Key(0,2,O({{"src",S("layout")},
+            {"coord",A({N(0),N(0),N(-10)})}}))}),A({picture("red","src/images/body",1)}));
+        run(A({high,low}),true,"parent Z accumulation wins across unrelated child branches");
+        for(bool split:{false,true}) {
+            auto entry=Node(3,"nested entry",A({Key(0,2,O({
+                {"src",S(split?"actor":"motion/actor/inner")},{"icon",S("inner")},
+                {"coord",A({N(0),N(0),N(6)})}}))}));
+            auto parent=Node(2,"outer",A({Key(0,2,O({{"src",S("layout")},
+                {"coord",A({N(0),N(0),N(10)})}}))}),A({entry}));
+            run(A({parent,picture("red","src/images/body",12)}),true,
+                "nested motion GPU order includes both ancestor and attachment Z (10+6-2 > 12)");
+        }
+        // The label spellings used by the removed hacks are ordinary strings.
+        run(A({picture("neutral","src/images/body",0),picture("後髪","src/images/face",0)}),true,
+            "authored hair labels do not synthesize paint hints at equal Z");
+        run(A({picture("neutral","src/images/body",0),picture("■首","src/images/face",0)}),true,
+            "authored neck labels do not synthesize paint hints at equal Z");
+        auto hair_group=Node(2,"髪",A({Key(0,2,O({{"src",S("layout")}}))}),
+            A({picture("追加パーツ","src/images/face",0)}));
+        run(A({picture("neutral","src/images/body",0),hair_group}),true,
+            "additional-part labels under hair scopes do not synthesize paint hints");
+        // Icon changes must not fetch an atlas zorder, and a HOLD in the middle
+        // of playback keeps the last live Z rather than falling back to zero.
+        auto doc=Scene();auto& motion=doc.root.object["object"].object["actor"].object["motion"].object["idle"];
+        auto animated=Node(0,"animated",A({
+            Key(0,3,O({{"src",S("src/images/face")},{"coord",A({N(0),N(0),N(4)})}})),
+            Key(4,2,O({{"src",S("src/images/wide")},{"coord",A({N(0),N(0),N(-4)})}})),
+            Key(6,0),Key(9,2,O({{"src",S("src/images/face")},{"coord",A({N(0),N(0),N(4)})}}))}));
+        motion.object["layer"]=A({animated,picture("red","src/images/body",0)});
+        motion.object["lastTime"]=N(20);motion.object["loopTime"]=N(-1);
+        auto& icons=doc.root.object["source"].object["images"].object["icon"];
+        icons.object["face"].object["metadata"]=O({{"zorder",N(-100)}});
+        icons.object["wide"].object["metadata"]=O({{"zorder",N(100)}});
+        auto model=std::make_shared<artc::EmoteModel>();std::string error;
+        Check(model->Load(doc,error),error.c_str());artc::EmoteScene scene;
+        Check(scene.Load(model,error),error.c_str());c.SetProps("30",{{"left","8"},{"top","8"}});
+        for(double frame:{0.0,1.0,3.0,4.0,5.0,6.0,8.0,9.0,25.0}) {
+            Check(scene.Render(c,"30",frame,{},error),error.c_str());c.Draw();
+            const bool green_top=frame<2 || frame>=9;
+            Check(At(8,8)[green_top?1:0]==255 && At(8,8)[green_top?0:1]==0,
+                "interpolated runtime Z, icon switch and HOLD drive actual pixels without atlas overrides");
+            const auto expected=green_top?"30.000001.000000":"30.000002.000000";
+            Check(c.HitLayer(8,8)==expected && c.HitLayers(8,8).front()==expected,
+                "both production rectangle hit queries track current Z draw order");
+            artc::CompositorOrderRegression::AllocationFree(c);
+        }
+        c.ReleaseGl();c.Init(32,32);
+    }
     auto emote=std::make_shared<artc::EmoteModel>();std::string emote_error;
     Check(emote->Load(emote_fixture::Scene(),emote_error),emote_error.c_str());
     artc::EmoteScene emote_scene;Check(emote_scene.Load(emote,emote_error),emote_error.c_str());
