@@ -1995,6 +1995,20 @@ void Compositor::ReleaseStageMaskGl() {
 // second pass over them; the result is sampled in stage space by masked
 // layers. Distinct keys keep distinct masks alive until the next render.
 uint32_t Compositor::RenderStageMask(int key, const std::vector<std::string> &ids) {
+    return RenderStageMask("#" + std::to_string(key), ids);
+}
+
+void Compositor::ReleaseStageMasks(const std::string &prefix) {
+    if (!gl_ready_) return;
+    for (auto it = stage_masks_.begin(); it != stage_masks_.end();) {
+        if (it->first.compare(0, prefix.size(), prefix) != 0) { ++it; continue; }
+        if (it->second.fbo) glDeleteFramebuffers(1, &it->second.fbo);
+        if (it->second.texture) glDeleteTextures(1, &it->second.texture);
+        it = stage_masks_.erase(it);
+    }
+}
+
+uint32_t Compositor::RenderStageMask(const std::string &key, const std::vector<std::string> &ids) {
     if (!gl_ready_ || ids.empty()) return 0;
     StageMaskTarget &target = stage_masks_[key];
     if (!target.fbo) {
@@ -2295,7 +2309,9 @@ bool Compositor::SetText(const std::string &id, const std::string &text,
 }
 void Compositor::Shutdown() { layers_.clear(); present_cb_ = nullptr; }
 void Compositor::ReleaseGl() { ++revision_; layers_.clear(); tweens_.clear(); tween_set_.clear(); collecting_tweens_ = false; trans_active_ = false; gl_ready_ = false; }
+uint32_t Compositor::RenderStageMask(const std::string &, const std::vector<std::string> &) { return 0; }
 uint32_t Compositor::RenderStageMask(int, const std::vector<std::string> &) { return 0; }
+void Compositor::ReleaseStageMasks(const std::string &) {}
 void Compositor::SetLayerStageMask(const std::string &id, uint32_t texture) {
     for (auto &l : layers_) {
         if (l.id != id) continue;

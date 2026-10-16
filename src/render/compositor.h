@@ -104,7 +104,13 @@ public:
     // stage-sized mask texture selected by `key` and return it (0 when GL is
     // unavailable or no layer drew). The mask is sampled in stage space by
     // masked layers; distinct keys keep distinct masks alive across a frame.
+    // Callers must make the key unique per rendered source set (and owner):
+    // equal keys share, and overwrite, one texture.
+    uint32_t RenderStageMask(const std::string &key, const std::vector<std::string> &ids);
     uint32_t RenderStageMask(int key, const std::vector<std::string> &ids);
+    // Free the mask textures whose key starts with `prefix` (no-op without GL).
+    // Layers still pointing at them must be re-attached or cleared first.
+    void ReleaseStageMasks(const std::string &prefix);
     // Attach (texture != 0) or clear (texture == 0) the stage mask of a layer.
     void SetLayerStageMask(const std::string &id, uint32_t texture);
     // Explicit same-Z owner-local extension (smaller = earlier/behind). Never
@@ -349,7 +355,7 @@ private:
     // from the scene's mask layers and sampled per masked layer. One target
     // per mask label set (keyed by the caller) so several masks can coexist.
     struct StageMaskTarget { uint32_t fbo = 0, texture = 0; };
-    std::map<int, StageMaskTarget> stage_masks_;
+    std::map<std::string, StageMaskTarget> stage_masks_;
     void ReleaseStageMaskGl();
 
     // [prohibit]/[wordparts]/[indent] configuration (empty = documented default)

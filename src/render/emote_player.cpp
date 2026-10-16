@@ -3,6 +3,7 @@
 #include "log/logger.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 
 namespace artc {
@@ -30,6 +31,12 @@ bool FitsFloat(long double value) {
 }
 std::string Num(double v) {
     return std::to_string(v);
+}
+// ARTC_EMOTE_DUMP diagnostic: record driver commands so a game state can be
+// replayed through tools/emote_preview.
+void DumpCommand(const void* player, const std::string& text) {
+    if (std::getenv("ARTC_EMOTE_DUMP"))
+        Log(kLogInfo, "emote-cmd player=" + std::to_string(reinterpret_cast<uintptr_t>(player)) + " " + text);
 }
 }  // namespace
 
@@ -320,11 +327,13 @@ bool EmotePlayer::PlayTimeline(const std::string& label, int flags, std::string&
     // Validate before bit0's destructive operation. Android proxy forwards
     // official flags unchanged: bit1 is private diff, NOT a timeline FIFO.
     if (!ValidateTimeline(label, error)) return false;
+    DumpCommand(this, "play '" + label + "' flags=" + std::to_string(flags));
     if (!(flags & kTimelineParallel)) StopAllTimelines();
     return EnsurePlaying(label, flags, 1.0, error) != nullptr;
 }
 
 void EmotePlayer::StopTimeline(const std::string& label) {
+    DumpCommand(this, "stop '" + label + "'");
     if (label.empty()) { StopAllTimelines(); return; }
     for (auto it = playing_.begin(); it != playing_.end();) {
         if (it->first == label)
@@ -362,6 +371,7 @@ bool EmotePlayer::FadeInTimeline(const std::string& label, double duration_ms, d
         error = "E-mote fade expects finite duration and ease";
         return false;
     }
+    DumpCommand(this, "fadeIn '" + label + "' ms=" + Num(duration_ms));
     auto* entry = EnsurePlaying(label, kTimelineParallel | kTimelinePrivateDiff, 0.0, error);
     if (!entry) return false;
     entry->blend.Set(1.0, duration_ms, ease, queuing_);
@@ -375,6 +385,7 @@ bool EmotePlayer::FadeOutTimeline(const std::string& label, double duration_ms, 
         error = "E-mote fade expects finite duration and ease";
         return false;
     }
+    DumpCommand(this, "fadeOut '" + label + "' ms=" + Num(duration_ms));
     for (auto& entry : playing_) {
         if (entry.first != label) continue;
         entry.second.blend.Set(0.0, duration_ms, ease, queuing_);
@@ -398,6 +409,7 @@ bool EmotePlayer::SetTimelineBlendRatio(const std::string& label, double ratio,
         error = "E-mote blend expects finite ratio, transition and ease";
         return false;
     }
+    DumpCommand(this, "blend '" + label + "' ratio=" + Num(ratio) + " ms=" + Num(transition_ms));
     for (auto& entry : playing_) {
         if (entry.first != label) continue;
         entry.second.blend.Set(std::clamp(ratio, 0.0, 1.0), transition_ms, ease, queuing_);
@@ -501,6 +513,7 @@ bool EmotePlayer::SetVariable(const std::string& label, double value, double tra
         error = "E-mote variable expects finite value, transition and ease";
         return false;
     }
+    DumpCommand(this, "set '" + label + "' = " + Num(value) + " ms=" + Num(transition_ms));
     WriteBaseVariable(label, value, transition_ms, ease);
     error.clear();
     return true;
@@ -541,6 +554,7 @@ bool EmotePlayer::SetVariableDiff(const std::string& label, const std::string& p
         error = "E-mote variable diff expects finite value, transition and ease";
         return false;
     }
+    DumpCommand(this, "diff '" + label + "' '" + pair + "' = " + Num(value) + " ms=" + Num(transition_ms));
     variable_diffs_[{label, pair}].Set(value, transition_ms, ease, queuing_);
     error.clear();
     return true;
@@ -1003,6 +1017,21 @@ bool EmotePlayer::Render(Compositor& compositor, const std::string& id, std::str
     }
     std::map<std::string, double> variables;
     if (!ComposeVariables(variables, error)) return false;
+    if (std::getenv("ARTC_EMOTE_DUMP")) {
+        // Diagnostic: log the composed state handed to the scene whenever it changes.
+        std::string state = "mirror=" + std::string(EffectiveMirror() ? "1" : "0") + " playing=[";
+        for (const auto& p : playing_) state += p.first + (p.second.flags & kTimelinePrivateDiff ? "(diff) " : " ");
+        state += "] vars={";
+        for (const auto& v : variables)
+            if (v.second != 0) state += v.first + "=" + Num(v.second) + " ";
+        state += "}";
+        static std::map<const EmotePlayer*, std::string> last_state;
+        auto& last = last_state[this];
+        if (last != state) {
+            last = state;
+            Log(kLogInfo, "emote-state " + id + " " + state);
+        }
+    }
     // SetProps parses these values as float (rotation even falls back to zero
     // on parse failure). Validate raw controls AND derived container properties
     // before touching the holder, instead of letting stof throw/misrender.

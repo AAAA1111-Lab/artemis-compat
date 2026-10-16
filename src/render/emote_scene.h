@@ -126,6 +126,8 @@ private:
     size_t atlas_decodes_=0;
     std::map<std::string,std::pair<std::string,std::string>> installed_;
     std::set<std::string> installed_layers_;
+    // Owner-scoped stage-mask keys currently held in the compositor.
+    std::set<std::string> mask_keys_;
     // metadata.attrcomp removals, keyed "chara\nmotion\nlayer"; nodes matching
     // one are skipped by both validation and evaluation.
     std::set<std::string> removed_;

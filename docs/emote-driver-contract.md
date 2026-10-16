@@ -4,6 +4,8 @@
 > 2026-10-16 重新读取下列本机 DLL 及 Android APK 内嵌插件库。未执行库、游戏、设备或存档操作；Android 库通过 ZIP 内存读取，未解包落盘，未读取外部实现源码。
 > 本文及 `emote-driver-slots.csv` 不含二进制、反编译代码、标题密钥或商业模型。
 > “静态已确认”不等于官方宿主 ABI 或真实模型动态兼容验证通过。
+> 项目实现状态以主计划[顶部账本](emote-plan.md#execution-ledger)为准（本机合成时点：
+> `build-test` 27/27、`build-cgl` 29/29；不代表游戏/设备/官方一致）；本文仍是静态事实记录。
 
 ## 1. 样本身份、工具与证据等级
 
@@ -230,7 +232,7 @@ Step 的完整公开短链未调用 Progress、CalcLayerFrameInfo、MMotionPlaye
 
 ### 可实现正常事实与未证边界
 
-上述正常路径足以独立设计 flags0 全清、bit1 私有差分、控制器 queuing、Pass/Step/Skip 的合成断言；**不改变未知 getter 为猜测值**。异常浮点/整数溢出、畸形 loop、bit2 外部输入与内部 Pass 标记的全部约束、特殊控制器覆盖顺序、真实脚本在这些调用后何时 Progress、stereovision 及所有版本的动态视觉结果仍未证。实现 agent 正在独立对齐，本文不先称实现/回归/真实模型已通过。
+上述正常路径足以独立设计 flags0 全清、bit1 私有差分、控制器 queuing、Pass/Step/Skip 的合成断言；**不改变未知 getter 为猜测值**。异常浮点/整数溢出、畸形 loop、bit2 外部输入与内部 Pass 标记的全部约束、特殊控制器覆盖顺序、真实脚本在这些调用后何时 Progress、stereovision 及所有版本的动态视觉结果仍未证。当前项目源码已按上述正常路径实现 flags0 全清、bit1 私有差分、queuing、Step/Skip/Pass 并有合成回归（见主计划账本），`PlayingTimelineFlagsAt` 仍返回 stored flags（官方 getter 为 `|1`，未改）；官方/插件同调用轨迹与真实模型动态验收仍未做。
 
 ## 6. E6/E7：结构过滤、纹理 callback 与容器证据分开
 
@@ -269,25 +271,25 @@ Step 的完整公开短链未调用 Progress、CalcLayerFrameInfo、MMotionPlaye
 
 ## 8. Lua API / 回归 / 不实现边界（历史基线，非当前验收）
 
-这是**首次调查时、实现 agent 后续并行改动之前**的工作区基线，非最新实现能力表。E2/E3 已分派按本文件后续证据独立对齐，下表只保留“为什么旧断言不能作官方证据”的追溯，不断言改动后代码仍有相同缺口，也不抢先报告通过。Lua 注册见 `src/script/lua_engine.cpp` 的 `kEmoteMethods`，实现见 `src/render/emote_player.{h,cpp}`；实际进度以实现提交和独立验证为准。本次只核对静态事实，没有运行项目测试。
+这是**首次调查时的工作区基线**，非当前实现能力表。E2/E3 此后已按本文件证据对齐（见主计划账本），下表保留“为什么旧断言不能作官方证据”的追溯，其中“旧基线/正在对齐”的描述只说明当时。Lua 注册见 `src/script/lua_engine.cpp` 的 `kEmoteMethods`，实现见 `src/render/emote_player.{h,cpp}`；当前进度以主计划账本与独立验证为准。本文只记录静态事实，不替代项目测试。
 
 | DLL 已知面 / 未知面 | 项目 Lua/API 状态与差异 | 已有回归或明确边界 |
 |---|---|---|
 | SetCoord / SetScale（21/23） | Lua setCoord(x,y,z,angle)、setScale(scale,origin_x,origin_y)，不同于 native 记录参数解释；不直接绑定二进制 ABI | emote_regressions 的 angle/origin、即时 placement 保持断言；官方插件映射待证 |
 | SetRot / SetColor / SetGrayscale（25/27/29） | 已注册 setRot/setColor/setGrayscale；Lua 帧时长转换与 native 时钟需分层；颜色布局不能由 `%d` 独立证明 | emote_regressions 的颜色/灰度/过渡断言；像素回归不能代替官方轨迹 |
 | SetVariable（40） | 已注册 setVariable/getVariable；getter 正式 DLL 槽名未恢复，不按相邻槽猜配 | emote_regressions 的未知变量、ease 正负分支；官方最终混合待证 |
-| SetVariableDiff / pair getter（42/43） | 旧基线为 +v/-v 双写且未注册 getter；§4 已证 second 聚合与 base getter 分离；实现 agent 正在对齐 | 旧 equal-and-opposite 断言是项目假设，不是官方证据；新合成回归及真实模型验收须单独记录 |
-| PlayTimeline / StopTimeline（57/59）及 queuing | 旧基线未做 bit0=0 全清、bit1 为 sequential、空串 Stop 未全清；§5 的 Android wrapper 已反证“宿主层翻译成 sequential”解释 | 旧 queue 回归不是官方证据；后续须验证私有差分、独立命令队列，不将过时断言当兼容结论 |
+| SetVariableDiff / pair getter（42/43） | 旧基线为 +v/-v 双写且未注册 getter；§4 已证 second 聚合与 base getter 分离；当前已按 ordered pair 实现并注册 getter（合成回归） | 旧 equal-and-opposite 断言是项目假设，不是官方证据；新合成回归及真实模型验收须单独记录 |
+| PlayTimeline / StopTimeline（57/59）及 queuing | 旧基线未做 bit0=0 全清、bit1 为 sequential、空串 Stop 未全清；§5 的 Android wrapper 已反证“宿主层翻译成 sequential”解释 | 旧 queue 回归不是官方证据；当前已实现私有差分与独立命令队列并有合成回归（emote_timeline_regressions），官方/插件轨迹验证仍缺，不将合成断言当官方兼容结论 |
 | Blend / FadeIn / FadeOut（60/62/63） | 已注册相应 API，支持过渡及零 blend 移除；native 全 flags 域未穷尽验证 | emote_regressions 的 fade-in/out、direct blend、auto-stop 断言；完整官方边界仍待证 |
-| Skip / Pass / Step（65/66/67） | 旧基线 Pass 完成全局过渡、Step 固定一帧；§5 已确认这些不是该 Android wrapper 的行为 | 旧 pass completes / 60 次 step 断言不是官方证据；新的边界提交和不加 base frame 回归由实现任务维护 |
-| SetOuterForce / SetOuterRot（44/84） | 初次读取时未注册具体物理方法，落入 logging stub；交付检查已观察到其他 agent 新增同名注册，不能仅据注册声称实现物理 | 本次不实现/不新增代理；后续显式不支持代理与完整物理必须区分，需要真实模型及独立物理契约 |
+| Skip / Pass / Step（65/66/67） | 旧基线 Pass 完成全局过渡、Step 固定一帧；§5 已确认这些不是该 Android wrapper 的行为 | 旧 pass completes / 60 次 step 断言不是官方证据；边界提交和不加 base frame 的合成回归现由 emote_timeline_regressions 维护，官方轨迹验证仍缺 |
+| SetOuterForce / SetOuterRot（44/84） | 初次读取时未注册具体物理方法，落入 logging stub；当前已注册专用代理，校验参数后返回 false+reason，不能仅据注册声称实现物理 | 显式不支持代理（E5 决策 A）与完整物理必须区分，需要真实模型及独立物理契约 |
 | CalcLayerFrameInfo（68） | 不公开同名 Lua 方法，项目由内部场景求值/渲染承担；输出 ABI 未恢复 | 本次不暴露 native 层数组；不将相似用途称为结构兼容 |
 | record/replay（86..94） | 正式槽名未知，未注册记录/回放 Lua API | 不实现二进制调用桥；E13 动态工具待环境和 host ABI |
 | 引用计数/析构、device 创建/配置 | Lua userdata 有自有生命周期，不直接调用官方 DLL；device 配置正式名和签名未知 | 本次不新增二进制 ABI 层；未知配置不按字段偏移猜功能 |
 | 其他未知 player 槽 | Lua 还暴露枚举/getters/show/hide/contains/progress 等；没有逐槽官方证据，不把这些名字填入未知槽 | 仅保留自有 API/合成回归；不宣称覆盖全部 native 方法 |
 | EmoteFilterTexture / CheckValidObject；E7 | 无同名 DLL bridge；项目 DecodePsb 支持的容器不等于官方导出等价；多文件显式拒绝 | psb_encrypted_regressions 为合成解密/容器断言；真实整包和拆分样本缺失 |
 
-**状态：**E1 原始槽地址清单已完整归档；正式签名/大部分名称及宿主映射仍不完整。E2/E3/E6/E7/E13 未因本次静态研究获得真实模型或 Windows 动态验收。主/detail 计划状态由其他任务维护，本次不修改。
+**状态：**E1 原始槽地址清单已完整归档（120 行 / 240 DWORD 校验通过，见 §9）；正式签名/大部分名称及宿主映射仍不完整。E2/E3/E6/E7/E13 未因静态研究获得真实模型或 Windows 动态验收。项目实现状态见主计划账本。
 
 Android 的已确认 Lua 方法只限定固定样本，不将其额外符号填入 Windows CSV 未知槽；本次不新增/猜测 timeline、record/replay 或变量 getter 的返回规则。
 

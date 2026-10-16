@@ -1274,6 +1274,42 @@ int main() {
     }
     {
         using namespace emote_fixture;
+        // Stencil masks are resolved per masked part and per owner. Two mask
+        // sources share one label (left/right), and one model is installed by
+        // two owners with the same label list: each masked part is clipped to
+        // ITS nearest source, never to a mask built for a sibling or another
+        // owner. Synthetic art only; red body clipped by green face masks.
+        auto doc=Scene();
+        auto picture=[](const char* label,const char* src,double x,double z,double scale) {
+            return Node(0,label,A({Key(0,2,O({{"src",S(src)},{"coord",A({N(x),N(0),N(z)})},
+                {"zx",N(scale)},{"zy",N(scale)}}))}));
+        };
+        auto group=Node(12,"group",A({Key(0,2,O({{"src",S("layout")}})),Key(11,0)}),
+            A({picture("left part","src/images/body",-8,5,3),picture("right part","src/images/body",8,5,3)}));
+        group.object["stencilType"]=N(4);
+        group.object["stencilCompositeMaskLayerList"]=A({S("source")});
+        doc.root.object["object"].object["actor"].object["motion"].object["idle"].object["layer"]=
+            A({picture("source","src/images/face",-8,0,4),picture("source","src/images/face",8,0,4),group});
+        auto model=std::make_shared<artc::EmoteModel>();std::string error;
+        Check(model->Load(doc,error),error.c_str());
+        artc::EmoteScene upper,lower;
+        Check(upper.Load(model,error),error.c_str());Check(lower.Load(model,error),error.c_str());
+        c.SetProps("30",{{"left","16"},{"top","9"}});c.SetProps("31",{{"left","16"},{"top","24"}});
+        Check(upper.Render(c,"30",0,{},error),error.c_str());
+        Check(lower.Render(c,"31",0,{},error),error.c_str());c.Draw();
+        const auto red=[&](int x,int y){const auto p=At(x,y);return p[0]>200 && p[1]<40;};
+        for(const int cy:{9,24}) {
+            Check(red(8,cy) && red(24,cy),
+                "each masked part keeps the coverage of its own nearest mask source for every owner");
+            // Parts span stage x 2..14 and 18..30; their masks only 4..12 and 20..28.
+            Check(!red(2,cy) && !red(13,cy) && !red(19,cy) && !red(29,cy),
+                "masked parts are clipped outside their own mask coverage");
+        }
+        upper.Remove(c,"30");lower.Remove(c,"31");c.DeleteLayer("30");c.DeleteLayer("31");
+        c.ReleaseGl();c.Init(32,32);
+    }
+    {
+        using namespace emote_fixture;
         // Entirely synthetic overlapping red/green icons; no asset labels or
         // atlas metadata may stand in for the sampled runtime coord[2].
         auto picture=[](const char* label,const char* src,double z) {

@@ -2,7 +2,8 @@
 
 > 2026-10-16 当前时点。只记行为事实与 VA/hash；不含反编译代码、商业控制点、
 > 标题密钥或商业模型。事实来源是固定官方 Android 样本的静态研究交接，加本项目
-> 合成夹具的观察；本文不运行游戏、设备或官方库，也不新增测试结果。
+> 合成夹具的观察；本文不运行游戏、设备或官方库。当前本机合成与构建时点：`build-test` 27/27，
+> `build-cgl` 29/29，Android 12 个入口导出检查通过（不代表游戏/设备/官方一致）。
 > 静态确认不等于动态视觉一致，项目是否实现另列。
 
 ## 1. 样本身份与 VA 口径
@@ -70,9 +71,15 @@
 
 - 非 head 的 shape anchor 补偿见第 6 节；combinator 自身的采样/插值/重建地址见第 3 节。
 
-- 项目侧 `emote_scene.cpp` 对不支持的 combine 组合（非 head 的 shape anchor、
-  异域、动态/退化祖先证明、祖先低位同步通道等）显式拒绝，不静默降级。
-- ancestor 停止规则的完整形式化仍在研究；scene 缓存接入未完成。
+- 项目侧 `emote_scene.cpp`：combinator 已接入 scene（Load 时解码并受预算约束），同域
+  meshCombine 已实现，combinator 优先于 frame `bp`。对无法证明的 combine 组合（低位同步通道、
+  cc、屏障、异域、动态/退化祖先证明、运行期精确检查失败等）**降级加载**：该节点按“无 combine”处理
+  （保持自身网格，不输出猜测值），并以 `UnsupportedFeatures` 记录
+  `meshCombine.fallback.{lowSync,cc,barrier,domain,dynamic,runtime}`；这不是已支持。
+- 真实 132 个 fg 模型 DecodePsb / Model / Player Load 全部成功（仅加载级），每个模型都命中
+  `clampControl.type0/1`、`meshSync.lowChannels`、`meshCombine.fallback`，131 个有 `timeline.openEnded`；
+  `EmoteScene::Load` 经图集解码缓存由约 4.2s 降到约 50ms。这是加载级观察，不是渲染或官方对照。
+- ancestor 停止规则的完整形式化仍在研究。
 
 ## 5. 低位 sync 与 shape 位
 
@@ -81,13 +88,13 @@
 | 同步掩码的低位通道（coord/angle/zoom 一类）与 shape 位是不同的位域，不可合并判断 | DLL：low sync `0x10042e60–0x1004330c`；shape 位判定见 shape 资格 `0x10044031–0x10044188`；nested 传递 `0x10046528–0x100465a0`、`0x100488a0–0x100488f4`。“两者不可合并”这一结论无独立地址，由上述区间的静态阅读得出 |
 
 - 判定“是否带 shape 作用域”只看 shape 位，不看低位 sync 通道；反之亦然。
-- 项目侧 meshSync：有限形状作用域已实现，无 frame 时挂起；各 sync 通道的完整语义
-  不属于已实现范围。
+- 项目侧 meshSync：有限形状作用域已实现，无 frame 时挂起；低位通道（`meshSync.lowChannels`）
+  不应用并记录，各 sync 通道的完整语义不属于已实现范围。
 
 ## 6. 未完成：屏障 anchor 补偿
 
-- 继承屏障处的 anchor 补偿**尚未完成**。项目对该情形显式拒绝
-  （`emote_scene.cpp` 的 shape inheritance barrier / non-head anchor 路径），
+- 继承屏障处的 anchor 补偿**尚未完成**。项目对该情形降级加载：该节点的 combine 不应用并记录
+  `meshCombine.fallback.barrier`（`emote_scene.cpp` 的 `CombinePreflight::Prove`），
   不输出猜测补偿值。
 - 恢复补偿前不得在文档或代码里把 meshCombine 称为支持屏障场景。
 - 官方侧屏障 anchor 补偿的承载代码：DLL `0x100449d3–0x10044ca1`。这只是已定位的地址，
@@ -162,4 +169,4 @@
 ## 10. 边界
 
 - 本文是格式/行为事实，不是实现完成声明；E9（Z / meshSync / combine）、E16 均未关闭。
-- 真实游戏视觉、官方同状态 A/B、0138 对照、Android 宿主合同均未做，见主计划账本。
+- 官方内核同状态逐像素对照（手机）进行中，0138 对照、Android 宿主合同验收未完成，见主计划账本。

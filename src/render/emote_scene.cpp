@@ -963,10 +963,13 @@ void Validate(const EmoteModel& model,const std::string& chara,const std::string
                     if(Num(f.At("type"))!=0)
                         for(const auto& coordinate:f.At("content").At("coord").array)Num(coordinate);
                 // Mask groups do not fail the model: their children still
-                // validate and render (unmasked until compositing exists).
+                // validate and render; the GL compositor clips them with the
+                // listed mask parts' alpha (stencilType bit 0x4 only).
                 static std::set<std::string> reported;
                 if(reported.insert("stencil").second)
-                    Log(kLogInfo,"emote: stencil/mask composites render unmasked (masks not implemented)");
+                    Log(kLogInfo,"emote: stencil containers present; stencilCompositeMaskLayerList "
+                        "masks render as stage-space alpha coverage on GL hosts (only stencilType bit "
+                        "0x4 is interpreted; other stencil modes are not applied)");
                 nodes(n.At("children"),level+1);
                 continue;
             }
@@ -1597,7 +1600,11 @@ bool EmoteScene::Render(Compositor& c,const std::string& id,double frame,
             if(l.source.empty())continue;
             sources_by_label[l.label].push_back(id+l.key+".000000");
         }
+        // One mask per resolved SOURCE set, not per label list: parts sharing
+        // labels (left/right eye) may resolve to different nearest sources, and
+        // several owners can share a label list. Keys are owner-scoped.
         std::map<std::vector<std::string>,uint32_t> mask_cache;
+        std::set<std::string> used_mask_keys;
         for(const auto& l:layers) {
             if(l.source.empty()||l.masks.empty())continue;
             const auto part=id+l.key+".000000";
@@ -1635,18 +1642,23 @@ bool EmoteScene::Render(Compositor& c,const std::string& id,double frame,
                 if(getenv("ARTC_EMOTE_DUMP")&&reported.insert(l.label).second)
                     Log(kLogInfo,"emote-mask unresolved for '"+l.label+"' labels="+[&]{std::string j;for(const auto& m:l.masks)j+=m+"|";return j;}());
                 c.SetLayerStageMask(part,0);continue;}
-            auto cached=mask_cache.find(l.masks);
+            auto cached=mask_cache.find(sources);
             if(cached==mask_cache.end()) {
-                std::string joined;
-                for(const auto& m:l.masks)joined+=m+'\n';
-                const int key=static_cast<int>(std::hash<std::string>{}(joined));
-                cached=mask_cache.emplace(l.masks,c.RenderStageMask(key,sources)).first;
+                std::string key=id+'\n';
+                for(const auto& source:sources)key+=source+'\n';
+                used_mask_keys.insert(key);
+                cached=mask_cache.emplace(sources,c.RenderStageMask(key,sources)).first;
             }
             // A mask whose sources did not draw leaves the part unmasked
             // (reference: a stencil without drawn mask layers is disabled).
             if(cached->second==0){c.SetLayerStageMask(part,0);continue;}
             c.SetLayerStageMask(part,cached->second);
         }
+        // Masks no longer requested (source set changed) free their textures;
+        // every part was re-attached or cleared above.
+        for(const auto& old_key:mask_keys_)
+            if(!used_mask_keys.count(old_key))c.ReleaseStageMasks(old_key);
+        mask_keys_=std::move(used_mask_keys);
     }
     // Opt-in source-image candidate sampling, not framebuffer provenance.
     // Production rectangle queries supply candidate order; deformation,
@@ -1808,6 +1820,8 @@ void EmoteScene::Remove(Compositor& c,const std::string& id) {
     // DeleteLayer on a dotted child cascades to its own descendants; keys here
     // are already full dotted paths, but the loop stays O(installed).
     for(const auto& key:installed_layers_)c.DeleteLayer(key);
+    for(const auto& key:mask_keys_)c.ReleaseStageMasks(key);
+    mask_keys_.clear();
     installed_layers_.clear();installed_.clear();installed_hits_.clear();installed_hit_owner_.clear();
 }
 }
