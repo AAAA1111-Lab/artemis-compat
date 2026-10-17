@@ -1438,6 +1438,52 @@ int main() {
     std::ifstream unchanged(save_directory+"/scene.png",std::ios::binary);
     Check(std::vector<uint8_t>((std::istreambuf_iterator<char>(unchanged)),{})==before,"invalid thumbnail request preserves the previous file");
     Check(messages.DoString("assert(e:file('scene.png'):sub(1,4)=='\\137PNG')","read saved PNG"),"script file reads include authorized saved images");
+    {
+        // Mac save-load scene shape: 783 layers, ids up to 20 segments deep.
+        // Ancestor/owner/id work per Draw must be linear in the layer count,
+        // not O(layers*depth) matrix compositions or O(layers^2) id scans.
+        c.ReleaseGl();c.Init(32,32);
+        const uint8_t px[4]={255,0,0,255};
+        size_t layers=0;
+        auto build=[&](bool owners) {
+            for(int k=0;k<39;++k) {
+                std::string id=std::to_string(100+k);const std::string owner=id;
+                for(int d=1;d<=20;++d) {
+                    if(!owners) {
+                        c.SetProps(id,{{"left","1"},{"top","1"}});
+                        if(d%5==0){Check(c.SetPixels(id,px,1,1),"perf texture");c.SetProps(id,{{"w","8"},{"h","8"}});}
+                        ++layers;
+                    } else Check(c.SetLayerEmoteOrder(id,owner,d),"perf owner registration");
+                    id+=".1";
+                }
+            }
+        };
+        build(false);
+        for(int k=0;k<3;++k){c.SetProps(std::to_string(900+k),{});++layers;}
+        Check(layers==783 && c.Layers().size()==783,"synthetic 783-layer scene");
+        auto cheapest_draw=[&] {
+            uint64_t best=~0ull;
+            // The 300-frame diagnostic walks every layer once; the cheapest of
+            // three consecutive draws excludes it.
+            for(int i=0;i<3;++i) {
+                const auto before=c.Counters();c.Draw();
+                best=std::min(best,c.Counters().transform_applies-before.transform_applies);
+            }
+            return best;
+        };
+        c.Draw();
+        Check(cheapest_draw()<=layers,"Draw composes each layer's world transform at most once");
+        build(true);
+        c.Draw();
+        const auto before_owned=c.Counters();
+        Check(cheapest_draw()<=layers,"Draw with E-mote owners composes each layer at most once");
+        const auto after_owned=c.Counters();
+        Check(after_owned.index_rebuilds==before_owned.index_rebuilds &&
+              after_owned.owner_rebuilds==before_owned.owner_rebuilds &&
+              after_owned.index_lookups-before_owned.index_lookups<=3*layers*21,
+              "steady-state Draw reuses the id index and owner list");
+        c.ReleaseGl();c.Init(32,32);
+    }
     std::filesystem::remove_all(save_directory);
     std::filesystem::remove(path);
     c.Shutdown();

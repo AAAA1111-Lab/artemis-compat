@@ -252,6 +252,19 @@ rg 'make_unique<PackManager>|make_unique<LuaEngine>' src  # 只应命中 core/en
   只在 `revision_` 变化时重建（`draw_textures_rev_` 记忆）——稳态零分配。
   `LayerShaders::End` 的 textures 参数类型与之同步；改签名必须同时改桩实现。
 - 诊断输出（`draw[]`）保持 300 帧节流；非诊断路径不得拼字符串。
+- **图层 id 索引与变换记忆（783 层读档场景 11→60fps 的修复）**：
+  `layers_` 上有惰性重建的 id→下标哈希索引（首个同 id 优先，重复 id 链式保留）、
+  每层“最近存在的点分前缀祖先”下标，以及已排序去重的有效 E-mote owner 列表。
+  `EffectiveTransform` / `BuildDrawList` / `SetLayerEmoteOrder` / `GetLayerInfo` /
+  `Update` 的 tween 目标都走它，禁止再对 `layers_` 做 id 线性扫描或在热路径拼
+  `id+"."`。**失效规则**：任何 `push_back/erase/clear/改 id` 必须调用
+  `InvalidateLayerIndex()`；任何改 `effect.emote_owner` 必须调用
+  `InvalidateEmoteOwners()`（`Index()` 另有 data 指针 + size 自检兜底，但不能替代显式失效）。
+  只读整遍扫描（Draw、HitLayer(s)、DescribeDrawList、EmoteScene 蒙版中心）用
+  `Compositor::TransformCache` 记忆世界矩阵（作用域内不得改图层表/属性）。
+  `PendingTextMs/FinishText` 先排除无文字图层再算 EffectiveRect。回归：
+  `compositor_index_regressions`（等价 + 失效 + `Counters()` 复杂度断言）与
+  `compositor_regressions` 里的 783 层 Draw 计数断言。
 - **`revision_` 是重绘门控的唯一依据**，所有改变输出的入口必须 bump：
   `LoadImage / SetProps / SetText / SetLayerMesh / SetPixels / DeleteLayer /
   RenameLayer / ReleaseGl / AddTween / BeginTransition / Update(有变化时)`。

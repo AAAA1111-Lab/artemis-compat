@@ -199,6 +199,27 @@ public:
     };
     // Local content coordinates -> stage; used by rendering and inverse hit tests.
     Transform EffectiveTransform(const Layer& layer) const;
+    // RAII: while alive, ancestor transforms are memoized per layer, so a pass
+    // over all layers costs O(N) instead of O(N*depth). Only valid while the
+    // layer table and layer properties are not mutated (Draw, hit tests,
+    // per-frame read-only scans). Nestable; results are bit-identical.
+    class TransformCache {
+    public:
+        explicit TransformCache(const Compositor& c);
+        ~TransformCache();
+        TransformCache(const TransformCache&) = delete;
+        TransformCache& operator=(const TransformCache&) = delete;
+    private:
+        const Compositor& c_;
+    };
+    // Complexity counters for regression tests (not behavior).
+    struct PerfCounters {
+        uint64_t index_rebuilds = 0;    // id->layer index rebuilds
+        uint64_t owner_rebuilds = 0;    // registered E-mote owner list rebuilds
+        uint64_t index_lookups = 0;     // id->layer lookups served by the index
+        uint64_t transform_applies = 0; // per-layer matrix compositions
+    };
+    const PerfCounters& Counters() const { return counters_; }
     // Convert a pointer displacement to the coordinate space of lyprop left/top.
     bool ParentDelta(const std::string& id, float dx, float dy, float* x, float* y) const;
     std::string HitLayer(float x, float y) const;
@@ -292,8 +313,45 @@ private:
     };
     struct DrawOrderScratch {
         std::vector<DrawOrderEntry> entries;
+    };
+    // id -> layer index over layers_ (first match wins, later duplicates are
+    // chained), nearest existing dotted-prefix ancestor per layer, and the
+    // sorted distinct valid E-mote owners. Rebuilt lazily; every mutation of
+    // layers_ (push/erase/clear/rename) must call InvalidateLayerIndex(), and
+    // every change of an emote_owner must call InvalidateEmoteOwners().
+    // Index() also self-checks data pointer and size as a safety net.
+    static constexpr uint32_t kNoLayer = ~0u;
+    struct LayerIndex {
+        bool valid = false, owners_valid = false;
+        const Layer* data = nullptr;
+        size_t size = 0;
+        uint32_t mask = 0;
+        std::vector<uint32_t> slots;      // open addressing: 0 empty, else index+1
+        std::vector<uint32_t> parent;     // nearest existing ancestor or kNoLayer
+        std::vector<uint32_t> next_same;  // next layer with the same id
+        std::vector<uint32_t> tail;       // last layer of a duplicate chain (by first)
         std::vector<std::string_view> owners;
     };
+    struct WorldEntry {
+        Transform m;
+        uint32_t stamp = 0;
+    };
+    const LayerIndex& Index() const;
+    void RebuildLayerIndex() const;
+    void InvalidateLayerIndex() { layer_index_.valid = false; layer_index_.owners_valid = false; }
+    void InvalidateEmoteOwners() { layer_index_.owners_valid = false; }
+    static uint32_t LookupIn(const LayerIndex& ix, const std::vector<Layer>& layers,
+                             std::string_view id);
+    uint32_t FindLayer(std::string_view id) const;
+    uint32_t NearestAncestor(std::string_view id) const;
+    const std::vector<std::string_view>& EmoteOwners() const;
+    Transform WorldTransform(uint32_t index) const;
+    static Transform ComposeLayer(const Transform& parent, const Layer& layer);
+    mutable LayerIndex layer_index_;
+    mutable std::vector<WorldEntry> world_cache_;
+    mutable uint32_t world_stamp_ = 0;
+    mutable int world_scope_ = 0;
+    mutable PerfCounters counters_;
     void BuildDrawList(std::vector<const Layer*>& sorted,
                        DrawOrderScratch& scratch) const;
     static bool DrawOrderLess(const DrawOrderEntry& a,const DrawOrderEntry& b);

@@ -103,7 +103,10 @@ bool MakeCurrent() {
 int main(int argc, char** argv) {
     if (argc < 3 || std::strcmp(argv[1], "--help") == 0) {
         std::cerr << "usage: emote_preview <model.psb> <out.png> [frame | --frame N]\n"
-                     "  [--variable label=value]... [--timeline label]... [--manifest path]\n"
+                     "  [--variable label=value]... [--variable-late label=value]...\n"
+                     "  [--timeline label]... [--manifest path]\n"
+                     "--variable-late applies after the timelines are queued (a timeline's t=0 key\n"
+                     "otherwise replaces an earlier --variable).\n"
                      "Frame must be finite and in [0, 216000] (60 fps; max one hour). Variables are set at t=0;\n"
                      "timelines play in parallel before progression. Duplicate variables apply in order.\n"
                      "Legacy dev transforms remain unchanged; this is not an official reference state.\n"
@@ -115,24 +118,26 @@ int main(int argc, char** argv) {
     bool frame_set = false;
     std::string manifest_path = std::string(argv[2]) + ".manifest.json";
     bool manifest_set = false;
-    std::vector<std::pair<std::string, double>> variables;
+    std::vector<std::pair<std::string, double>> variables, late_variables;
     std::vector<std::string> timelines;
     auto bad = [](const std::string& text) { std::cerr << "emote_preview: " << text << '\n'; return 2; };
     for (int i = 3; i < argc; ++i) {
         const std::string option = argv[i];
-        if (option == "--frame" || option == "--variable" || option == "--timeline" || option == "--manifest") {
+        if (option == "--frame" || option == "--variable" || option == "--variable-late" ||
+            option == "--timeline" || option == "--manifest") {
             if (i + 1 >= argc || !*argv[i + 1] || std::strncmp(argv[i + 1], "--", 2) == 0)
                 return bad("missing value for " + option);
             const std::string value = argv[++i];
             if (option == "--frame") {
                 if (frame_set || !Number(value, frame) || frame < 0) return bad("invalid/duplicate frame: " + value);
                 frame_set = true;
-            } else if (option == "--variable") {
+            } else if (option == "--variable" || option == "--variable-late") {
                 const auto equals = value.find('=');
                 double number = 0;
                 if (equals == std::string::npos || equals == 0 || !Number(value.substr(equals + 1), number))
                     return bad("invalid variable (expected label=finite-number): " + value);
-                variables.emplace_back(value.substr(0, equals), number);
+                (option == "--variable" ? variables : late_variables)
+                    .emplace_back(value.substr(0, equals), number);
             } else if (option == "--timeline") {
                 timelines.push_back(value);
             } else {
@@ -207,6 +212,15 @@ int main(int argc, char** argv) {
     for (const auto& label : timelines) {
         if (!player.PlayTimeline(label, artc::EmotePlayer::kTimelineParallel, error)) {
             std::cerr << "timeline " << label << ": " << error << '\n';
+            return 1;
+        }
+    }
+    // --variable-late runs after the timelines are queued and before progression, so a
+    // value is not replaced by a timeline's t=0 instant key (e.g. to emulate a
+    // mid-blink face_eye_open on top of an expression timeline).
+    for (const auto& variable : late_variables) {
+        if (!player.SetVariable(variable.first, variable.second, 0, 0, error)) {
+            std::cerr << "variable " << variable.first << ": " << error << '\n';
             return 1;
         }
     }
@@ -330,6 +344,11 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < variables.size(); ++i) {
         if (i) manifest << ',';
         manifest << "{\"label\":" << Json(variables[i].first) << ",\"value\":" << variables[i].second << '}';
+    }
+    manifest << "],\n  \"late_variable_requests\": [";
+    for (size_t i = 0; i < late_variables.size(); ++i) {
+        if (i) manifest << ',';
+        manifest << "{\"label\":" << Json(late_variables[i].first) << ",\"value\":" << late_variables[i].second << '}';
     }
     manifest << "],\n  \"player_variables\": {";
     bool first = true;

@@ -29,6 +29,10 @@ add_executable(runtime_regressions runtime_regressions.cpp)
 target_link_libraries(runtime_regressions PRIVATE artemis_core)
 add_test(NAME runtime_regressions COMMAND runtime_regressions)
 
+add_executable(compositor_index_regressions compositor_index_regressions.cpp)
+target_link_libraries(compositor_index_regressions PRIVATE artemis_core)
+add_test(NAME compositor_index_regressions COMMAND compositor_index_regressions)
+
 add_executable(emote_regressions emote_regressions.cpp)
 target_link_libraries(emote_regressions PRIVATE artemis_core)
 add_test(NAME emote_regressions COMMAND emote_regressions)

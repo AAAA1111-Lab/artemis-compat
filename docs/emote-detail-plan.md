@@ -10,7 +10,7 @@ DoD 与各 WP 验收均保留，不因本次汇总删约束；历史“已落地
 - [x] E1 `staticdecision/synthetic`：120 行逐槽表、240 DWORD 独立校验通过；mirror 三函数地址已核对为入口 vs 内部范围粒度不同；完整 ABI 未知。
 - [ ] E2 `implemented/synthetic/staticdecision/missing`：ordered pair 控制器（second 聚合、getter 分离、有限性）、mirror 三态与 variableMatchList 取负已实现；官方模型对照、与 eye/selector/blink 覆盖顺序、stereovision 未验。
 - [ ] E3/WP0 `implemented/synthetic/staticdecision/missing`：flags bit0 清全部、bit1 私有差分（非 sequential）、Step/Skip/Pass 按官方静态语义、独立 setQueuing/getQueuing 已实现；`PlayingTimelineFlagsAt` 仍返回 stored flags（官方为 `|1`，未改）；官方/插件轨迹缺。
-- [x] E4 `implemented/synthetic`：分数灰度与 CGL 像素断言（build-cgl 29/29，compositor 回归连续 3 次）；窗口/设备观感另验。
+- [x] E4 `implemented/synthetic`：分数灰度与 CGL 像素断言（build-cgl 30/30，compositor 回归连续 5 次）；窗口/设备观感另验。
 - [x] E5 `implemented/synthetic/staticdecision`：A 分支专用 setOuterForce/setOuterRot 校验 + unsupported 已实现；不是物理模拟。
 - [ ] E6/WP6 `implemented/synthetic/staticdecision/missing`：LZ4 校验加固已实现并有合成坏流用例；真实 v2 body 样本缺。
 - [ ] E7 `staticdecision/missing`：多文件明确拒绝；拆分样本、合并规则与一致渲染未闭环。
@@ -27,11 +27,11 @@ DoD 与各 WP 验收均保留，不因本次汇总删约束；历史“已落地
 - [ ] Android 宿主合同（官方壳与 Tyranor-Next 各自 Activity/插件）验收；插件重新构建发布（TyranorNext 内 `libartemis-clean.so` 仍是旧 v29，需更新 manifest `pluginVersion`）。
 - [ ] 最后并行修改稳定后重跑原 DoD/主 §E14 的宿主验收（真实 GL 游戏、Android 设备/JNI）；不复用旧 22/22、CGL 24/24 等记录。
 
-**验证时点**（本机合成与构建，不代表游戏/设备/官方一致）：`build-test` 27/27，`build-cgl` 29/29
-（compositor 回归连续 3 次通过），`build-mac` / `build-android` / `build-consumer` /
+**验证时点**（本机合成与构建，不代表游戏/设备/官方一致）：`build-test` 28/28，`build-cgl` 30/30
+（compositor 回归连续 5 次通过），`build-mac` / `build-android` / `build-consumer` /
 `build-consumer-android` 构建通过，Android 12 个入口导出检查通过，`git diff --check` 通过。
 Mac 不能运行 Android 交叉产物，导出/链接通过不等于 JNI 行为兼容。更早的 22/22、23/23、
-24/24、25/25 属此前时点，不与当前混用。
+24/24、25/25、27/27（build-test）、29/29（build-cgl）属此前时点，不与当前混用。
 
 **当前补充**（并存于上文，不删原验收）：格式/行为证据见
 [emote-format-evidence.md](emote-format-evidence.md)（Z 取累计 `coord[2]`、rawMeshList
@@ -42,11 +42,30 @@ WP1–WP3 相关：mirror 有效值 = metadata XOR 用户状态，`Mirror` gette
 为扩展。orbit：首次 Progress 不消费 dt，整周期回同 index 不重发，
 tween duration=`(index+1)*(T/N)-phase`。stage 蒙版缓存缺陷已修（左右眼共用蒙版源、
 跨 owner key 碰撞，改按 owner + 解析源集合），Mac 读档 say_6/shi_36 眼睛虹膜/高光/红晕恢复。
-真实游戏快照中未观察到眨眼（不判定存在与否）。
+Mac 真实游戏已观察到自动眨眼并拍到完整闭眼帧（见主计划顶部“增量补记”；不等于官方逐像素一致）。
 
-**仍缺**：官方内核同状态逐像素对照（手机，进行中）、0138 闭环、Android 宿主合同验收、
-插件重新构建发布；E6 真实 v2 body 样本、E7 拆分样本、E8 移动端压缩格式样本、E17 需求门槛，
-E13 不启动。所有未达项回流账本，不以决策/暂缓/标题页截图替代原验收。无提交、暂存、发布或设备存档操作授权。
+**增量补记**（完整分层见[主计划“增量补记”](emote-plan.md#execution-ledger)，此处只摘要）：
+- 合成/实现：读档后 say_6+shi_36（783 层，159 层有纹理）Mac 自研内核约 11→58fps（不带快照区间；
+  带快照会偏低）。根因 `Compositor::EffectiveTransform` 按 id 线性找祖先、`PendingTextMs` 对无文字图层
+  白算 `EffectiveRect`；修复为惰性 id 索引 + 变换记忆 + 先排除无文字，失效规则见 AGENT.md §14，
+  新增 `tests/compositor_index_regressions.cpp` 以调用计数断言复杂度；`EmoteScene::Load`
+  约 4.2s→约 50ms。蒙版缓存缺陷已修（e2bf7ca）。
+- 眨眼（WP1 相关）：闭眼帧多余淡紫新月根因是 `shirome` frameList 中段 type-0（`content=null`）被 `Sample()`
+  当尾部 HOLD；现为“type-0 后仍有有效帧则不绘制但保留姿态供子节点继承，尾部 HOLD 不变”。
+  **由资产结构推断，官方静态事实无层 frameList 中段 type-0 的记录，不得写成官方已证**；132 个模型仅
+  `shirome` 命中（131 个模型各 2 个）。Mac 真实游戏已观察到 `metadata.eyeControl` 自动眨眼并拍到
+  完整闭眼帧（say_6：`face_eye_open`、`blinkFrameCount` 16、interval 30–180）。
+- 官方对照（手机 official，读 save0001，同场景不同帧/台词，**非同变量逐像素**）：say_6 脸/虹膜/红晕/发型/领口/
+  领结/手势视觉一致，官方可见眨眼；shi_36 在官方该帧未出现，未对照；0138 未闭环。手机存档备份在
+  `/Users/weiss/opencode/tn-saves/official-20261016-211827/`（不进仓库），save0001 哈希前后一致，
+  autosave/system.dat 因运行变化属预期。
+- E14 Mac 读档复现：游戏目录只读 + `--save-dir` 隔离副本；标题约第 1500 帧可交互；点击
+  `1684,293@1560`、`390,260@1700`、`806,497@1780`（已实测）。
+
+**仍缺**：官方内核同状态（同变量同帧）逐像素对照、shi_36 与 0138 对照（手机，进行中）、Android 宿主合同验收、
+插件重新构建发布（本轮按约定不发版）；低位 sync / cc / 屏障 anchor / clampControl / stereo /
+eye edge / eyebrow nodes / mouth shape 未实现（降级加载并记录 `UnsupportedFeatures`）；
+E6 真实 v2 body 样本、E7 拆分样本、E8 移动端压缩格式样本、E17 需求门槛，E13 不启动。所有未达项回流账本，不以决策/暂缓/标题页截图替代原验收。无提交、暂存、发布或设备存档操作授权。
 
 > **定位**：`docs/emote-plan.md`（主计划，E1–E17）的执行细化。本文覆盖
 > 「可落到代码与夹具」的工作包（WP0–WP11），每项包含：目标、现状证据、
@@ -203,7 +222,7 @@ E3/E14 原验收，不据代码落地全勾。
 ## WP1 — 自动眨眼（eyeControl）
 
 **最新执行补记**：多 blink 改为每个控制器独立消耗完整步长，跨相位不丢时间；
-实现与扩展测试已并入当前 27/27 合成回归。当前随机为每 player LCG，
+实现与扩展测试已并入当前 28/28 合成回归。当前随机为每 player LCG，
 不是下方早期设计的 mt19937。现实现 ComposeVariables 为基础变量/时间轴 → blink →
 selector；下方设计/风险对覆盖顺序曾不一致，保留作待核验约束，不能擅自声称官方优先级
 已证或删掉真机自然眨眼、对话推进不挂起、wait 不超时验收。
@@ -680,7 +699,7 @@ type1/geometry查询。项目 contains/hitTest 统一stage是自有扩展；下�
 > UnsupportedFeatures（不应用），真实 132 个 fg 模型 Load 全部成功（仅加载级）。
 > stage full-affine/shape leaf 定向见 WP9。
 > HIDE 已修精确 part，probe 已修为明确 production 顺序候选，仍不是最终像素归属；
-> 以下“未修复”只适用于当时。当前验证时点见顶部（27/27、29/29），为合成与构建验证，
+> 以下“未修复”只适用于当时。当前验证时点见顶部（28/28、30/30），为合成与构建验证，
 > 不是官方同状态验收。
 
 - **meshSync**：早期“真实模型无 bp/cc 载荷、仅一次性日志即可结项”已撤回；

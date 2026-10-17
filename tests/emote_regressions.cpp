@@ -1568,7 +1568,11 @@ static void SceneZChannelTests() {
         Key(3,2,content("src/images/face",8,8,-8)),Key(4,0),
         Key(9,2,content("src/images/wide",8,8,2))}));
     auto doc=Scene();auto& motions=doc.root.object["object"].object["actor"].object["motion"];
-    motions.object["idle"]=O({{"layer",A({parent,node("outside sibling",0,0,-10),switched})},
+    // A HOLD that a later live frame ends is an authored gap: no own art, last
+    // pose kept for descendants. A trailing HOLD keeps drawing its last live art.
+    auto tail=Node(0,"tail",A({Key(0,2,content("src/images/body",8,8,3)),Key(6,0)}),
+        A({node("tail child",0,0,1)}));
+    motions.object["idle"]=O({{"layer",A({parent,node("outside sibling",0,0,-10),switched,tail})},
         {"lastTime",N(20)},{"loopTime",N(-1)}});
     motions.object["inner"]=O({{"layer",A({node("nested leaf",0,0,-4)})},
         {"lastTime",N(20)},{"loopTime",N(-1)}});
@@ -1606,6 +1610,11 @@ static void SceneZChannelTests() {
               "transparent mount's ordinary children bypass it without leaking nested-player source Z");
         Check(find("switch").effective_z==(sample.first<3?7:sample.first<9?-8:2),
               "icon changes and HOLD use runtime Z, never static icon metadata");
+        const bool gap=sample.first>=4 && sample.first<9;
+        Check(find("switch").source.empty()==gap && find("switch").icon.empty()==gap,
+              "a HOLD followed by a live frame draws no own art; live frames draw");
+        Check(!find("tail").source.empty() && find("tail").effective_z==3 && find("tail child").effective_z==4,
+              "a trailing HOLD keeps drawing its last live art and Z");
     }
     artc::Compositor compositor;compositor.Init(32,32);
     Check(scene.Render(compositor,"30",0,{},error),error.c_str());
@@ -1614,7 +1623,7 @@ static void SceneZChannelTests() {
     // resets it on behalf of labels/metadata.
     compositor.SetLayerPaint(key,7);
     const auto revision=compositor.Revision();
-    Check(scene.Render(compositor,"30",4,{},error),error.c_str());
+    Check(scene.Render(compositor,"30",3,{},error),error.c_str());
     bool published=false;
     for(const auto& l:compositor.Layers())if(l.id==key) {
         published=l.effect.emote_z==-8 && l.effect.paint==7;

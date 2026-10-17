@@ -32,6 +32,9 @@ namespace {
 bool InLayerTree(std::string_view root,std::string_view id) {
     return id==root || (id.size()>root.size() && id.substr(0,root.size())==root && id[root.size()]=='.');
 }
+[[maybe_unused]] bool IsStrictDescendant(std::string_view root,std::string_view id) {
+    return id.size()>root.size() && id[root.size()]=='.' && id.compare(0,root.size(),root)==0;
+}
 bool ValidEmoteRegistration(const Layer& l) {
     return !l.effect.emote_owner.empty() && InLayerTree(l.effect.emote_owner,l.id);
 }
@@ -53,17 +56,18 @@ bool Compositor::SetLayerEmoteOrder(const std::string& id,const std::string& own
     // Owners are disjoint ID subtrees. Reject, rather than silently comparing
     // independent local ranks in a merged scene. Only resident, valid members
     // establish a registration; no separate root survives deletion or rename.
-    if(!owner.empty())for(const auto& l:layers_) {
-        const auto& other=l.effect.emote_owner;
-        if(ValidEmoteRegistration(l) && other!=owner &&
-           (InLayerTree(other,owner) || InLayerTree(owner,other)))return false;
+    // The distinct valid owners are cached, so this is O(owners) per call.
+    if(!owner.empty())for(const auto other:EmoteOwners()) {
+        if(other!=owner && (InLayerTree(other,owner) || InLayerTree(owner,other)))return false;
     }
-    for(auto& l:layers_)if(l.id==id) {
+    if(const uint32_t found=FindLayer(id);found!=kNoLayer) {
+        auto& l=layers_[found];
         if(owner.empty()){order=-1;effective_z=0;}
         if(l.effect.emote_owner==owner && l.effect.emote_order==order &&
             l.effect.emote_z==effective_z &&
            (!owner.empty() || (!l.effect.emote_tree && l.effect.paint==0)))return true;
         l.effect.emote_owner=owner;l.effect.emote_order=order;
+        InvalidateEmoteOwners();
         l.effect.emote_z=effective_z;
         l.effect.emote_tree=!owner.empty();
         if(owner.empty())l.effect.paint=0;
@@ -108,6 +112,7 @@ bool Compositor::RenameLayer(const std::string& id,const std::string& to) {
         }
         return {};
     };
+    InvalidateLayerIndex();
     for(auto& l:layers_) {
         if(!InLayerTree(id,l.id))continue;
         const auto next_id=mapped(l.id);
@@ -208,11 +213,11 @@ void Compositor::BuildDrawList(std::vector<const Layer*>& sorted,
                                DrawOrderScratch& scratch) const {
     // Reuse per-slot key storage. All text below is non-owning; sorting compares
     // only immutable lexicographic keys and never constructs strings.
-    auto& entries=scratch.entries;auto& owners=scratch.owners;
-    owners.clear();
-    for(const auto& l:layers_)if(ValidEmoteRegistration(l))owners.push_back(l.effect.emote_owner);
-    std::sort(owners.begin(),owners.end());
-    owners.erase(std::unique(owners.begin(),owners.end()),owners.end());
+    auto& entries=scratch.entries;
+    // Sorted distinct valid owners, cached until a registration changes. The
+    // id index resolves owner/ancestor layers in O(1) instead of scanning.
+    const auto& owners=EmoteOwners();
+    const auto& index=Index();
     if(entries.size()<layers_.size())entries.resize(layers_.size());
     for(size_t i=0;i<layers_.size();++i) {
         const auto& l=layers_[i];auto& e=entries[i];
@@ -224,7 +229,7 @@ void Compositor::BuildDrawList(std::vector<const Layer*>& sorted,
         e.external=owner;
         // The owner has one external overlay policy, even for mixed members.
         e.overlay=false;
-        for(const auto& root:layers_)if(root.id==owner)e.overlay=root.message_overlay;
+        for(uint32_t f=FindLayer(owner);f!=kNoLayer;f=index.next_same[f])e.overlay=layers_[f].message_overlay;
         auto append=[&](const Layer& part) {
             e.path.push_back({part.effect.emote_owner==owner?part.effect.emote_z:0,
                 part.effect.paint,part.effect.emote_owner==owner?part.effect.emote_order:-1,part.id});
@@ -234,8 +239,8 @@ void Compositor::BuildDrawList(std::vector<const Layer*>& sorted,
         // prefix of its leaves; local Z never becomes a global layer-ID Z.
         for(size_t dot=owner.size();dot<l.id.size();dot=l.id.find('.',dot+1)) {
             if(dot==std::string::npos)break;
-            for(const auto& parent:layers_)
-                if(parent.id.size()==dot && l.id.compare(0,dot,parent.id)==0 && parent.effect.Active())append(parent);
+            for(uint32_t f=FindLayer(std::string_view(l.id).substr(0,dot));f!=kNoLayer;f=index.next_same[f])
+                if(layers_[f].effect.Active())append(layers_[f]);
         }
         if(l.id!=owner)append(l);
     }
@@ -274,39 +279,170 @@ void Compositor::EffectiveRect(const Layer &l, float *ex, float *ey,
 // T(position) T(anchor) R(clockwise degrees) S(scale) S(reverse) T(-anchor).
 // Compose the complete ancestor chain, so rotation and mirroring move face
 // parts, glyphs and hit regions together, including nonuniform parent scales.
-Compositor::Transform Compositor::EffectiveTransform(const Layer& l) const {
-    std::vector<const Layer*> chain;
-    std::string id=l.id;
-    size_t dot;
-    while ((dot=id.rfind('.'))!=std::string::npos) {
-        id.resize(dot);
-        for (const auto& parent:layers_)
-            if (parent.id==id) { chain.push_back(&parent); break; }
-    }
-    Transform m;
-    auto apply=[&](const Layer& n) {
-        const float radians=std::remainder(n.rotate,360.f)*3.14159265358979323846f/180.f;
-        float co=std::cos(radians), si=std::sin(radians);
-        // Exact quadrants should not produce cracks or fail edge hit tests.
-        if (std::abs(co)<1e-7f) co=0;
-        if (std::abs(si)<1e-7f) si=0;
-        const float sx=n.sx*(n.reverse_x ? -1.f : 1.f);
-        const float sy=n.sy*(n.reverse_y ? -1.f : 1.f);
-        const float a=n.affine?n.affine_a:co*sx, b=n.affine?n.affine_b:si*sx;
-        const float c=n.affine?n.affine_c:-si*sy, d=n.affine?n.affine_d:co*sy;
-        const float tx=n.x+n.ax-a*n.ax-c*n.ay;
-        const float ty=n.y+n.ay-b*n.ax-d*n.ay;
-        const auto origin=m.Point(tx,ty);
-        const float ma=m.a*a+m.c*b, mb=m.b*a+m.d*b;
-        const float mc=m.a*c+m.c*d, md=m.b*c+m.d*d;
-        m.a=ma; m.b=mb; m.c=mc; m.d=md; m.tx=origin.first; m.ty=origin.second;
-        m.alpha*=n.alpha; m.visible=m.visible && n.visible;
+Compositor::Transform Compositor::ComposeLayer(const Transform& parent, const Layer& n) {
+    Transform m=parent;
+    const float radians=std::remainder(n.rotate,360.f)*3.14159265358979323846f/180.f;
+    float co=std::cos(radians), si=std::sin(radians);
+    // Exact quadrants should not produce cracks or fail edge hit tests.
+    if (std::abs(co)<1e-7f) co=0;
+    if (std::abs(si)<1e-7f) si=0;
+    const float sx=n.sx*(n.reverse_x ? -1.f : 1.f);
+    const float sy=n.sy*(n.reverse_y ? -1.f : 1.f);
+    const float a=n.affine?n.affine_a:co*sx, b=n.affine?n.affine_b:si*sx;
+    const float c=n.affine?n.affine_c:-si*sy, d=n.affine?n.affine_d:co*sy;
+    const float tx=n.x+n.ax-a*n.ax-c*n.ay;
+    const float ty=n.y+n.ay-b*n.ax-d*n.ay;
+    const auto origin=m.Point(tx,ty);
+    const float ma=m.a*a+m.c*b, mb=m.b*a+m.d*b;
+    const float mc=m.a*c+m.c*d, md=m.b*c+m.d*d;
+    m.a=ma; m.b=mb; m.c=mc; m.d=md; m.tx=origin.first; m.ty=origin.second;
+    m.alpha*=n.alpha; m.visible=m.visible && n.visible;
+    return m;
+}
+
+// Ancestor chain = the nearest existing dotted-prefix layer of each layer
+// (first layer with that id wins), found through the id index. World(i) is the
+// composition of the whole chain including layer i, before the content offset;
+// inside a TransformCache scope it is memoized per layer.
+Compositor::Transform Compositor::WorldTransform(uint32_t index) const {
+    const auto& ix=Index();
+    const bool cache=world_scope_>0 && world_cache_.size()>=layers_.size();
+    uint32_t local[64];
+    std::vector<uint32_t> spill;
+    size_t depth=0;
+    auto push=[&](uint32_t v) {
+        if(!spill.empty())spill.push_back(v);
+        else if(depth<64)local[depth++]=v;
+        else {spill.assign(local,local+64);spill.push_back(v);}
     };
-    for (auto it=chain.rbegin();it!=chain.rend();++it) apply(**it);
-    apply(l);
+    Transform m;
+    for(uint32_t cur=index;cur!=kNoLayer;cur=ix.parent[cur]) {
+        if(cache && world_cache_[cur].stamp==world_stamp_) {m=world_cache_[cur].m;break;}
+        push(cur);
+    }
+    const size_t count=spill.empty()?depth:spill.size();
+    for(size_t k=count;k-->0;) {
+        const uint32_t cur=spill.empty()?local[k]:spill[k];
+        m=ComposeLayer(m,layers_[cur]);
+        ++counters_.transform_applies;
+        if(cache) {world_cache_[cur].m=m;world_cache_[cur].stamp=world_stamp_;}
+    }
+    return m;
+}
+
+Compositor::Transform Compositor::EffectiveTransform(const Layer& l) const {
+    const Layer* base=layers_.data();
+    const std::less<const Layer*> before;
+    Transform m;
+    if(!layers_.empty() && !before(&l,base) && before(&l,base+layers_.size())) {
+        m=WorldTransform(uint32_t(&l-base));
+    } else {
+        // Detached probe (copy, or an identity layer standing for an absent id).
+        const uint32_t ancestor=NearestAncestor(l.id);
+        m=ComposeLayer(ancestor==kNoLayer?Transform():WorldTransform(ancestor),l);
+        ++counters_.transform_applies;
+    }
     const auto origin=m.Point(l.content_x,l.content_y);
     m.tx=origin.first; m.ty=origin.second;
     return m;
+}
+
+Compositor::TransformCache::TransformCache(const Compositor& c) : c_(c) {
+    if(c_.world_scope_++!=0)return;
+    c_.Index();
+    if(c_.world_cache_.size()<c_.layers_.size()) {
+        c_.world_cache_.reserve(std::max(c_.layers_.size(),c_.world_cache_.capacity()*2));
+        c_.world_cache_.resize(c_.layers_.size());
+    }
+    if(++c_.world_stamp_==0) {
+        for(auto& e:c_.world_cache_)e.stamp=0;
+        c_.world_stamp_=1;
+    }
+}
+Compositor::TransformCache::~TransformCache() { --c_.world_scope_; }
+
+const Compositor::LayerIndex& Compositor::Index() const {
+    if(!layer_index_.valid || layer_index_.data!=layers_.data() || layer_index_.size!=layers_.size())
+        RebuildLayerIndex();
+    return layer_index_;
+}
+
+uint32_t Compositor::LookupIn(const LayerIndex& ix, const std::vector<Layer>& layers,
+                              std::string_view id) {
+    uint32_t h=uint32_t(std::hash<std::string_view>()(id))&ix.mask;
+    while(const uint32_t slot=ix.slots[h]) {
+        if(layers[slot-1].id==id)return slot-1;
+        h=(h+1)&ix.mask;
+    }
+    return kNoLayer;
+}
+
+void Compositor::RebuildLayerIndex() const {
+    ++counters_.index_rebuilds;
+    auto& ix=layer_index_;
+    const size_t n=layers_.size();
+    size_t capacity=16;
+    while(capacity<n*2)capacity<<=1;
+    ix.slots.assign(capacity,0);
+    ix.mask=uint32_t(capacity-1);
+    ix.next_same.assign(n,kNoLayer);
+    ix.tail.assign(n,0);
+    ix.parent.assign(n,kNoLayer);
+    for(uint32_t i=0;i<n;++i) {
+        const std::string_view id=layers_[i].id;
+        uint32_t h=uint32_t(std::hash<std::string_view>()(id))&ix.mask;
+        bool duplicate=false;
+        while(const uint32_t slot=ix.slots[h]) {
+            const uint32_t first=slot-1;
+            if(layers_[first].id==id) {
+                ix.next_same[ix.tail[first]]=i;ix.tail[first]=i;duplicate=true;break;
+            }
+            h=(h+1)&ix.mask;
+        }
+        if(!duplicate){ix.slots[h]=i+1;ix.tail[i]=i;}
+    }
+    for(uint32_t i=0;i<n;++i) {
+        const std::string_view id=layers_[i].id;
+        size_t end=id.size();
+        for(;;) {
+            const size_t dot=id.substr(0,end).rfind('.');
+            if(dot==std::string_view::npos)break;
+            end=dot;
+            if(const uint32_t found=LookupIn(ix,layers_,id.substr(0,dot));found!=kNoLayer){ix.parent[i]=found;break;}
+        }
+    }
+    ix.data=layers_.data();ix.size=n;ix.valid=true;ix.owners_valid=false;
+}
+
+uint32_t Compositor::FindLayer(std::string_view id) const {
+    ++counters_.index_lookups;
+    return LookupIn(Index(),layers_,id);
+}
+
+uint32_t Compositor::NearestAncestor(std::string_view id) const {
+    const auto& ix=Index();
+    size_t end=id.size();
+    for(;;) {
+        const size_t dot=id.substr(0,end).rfind('.');
+        if(dot==std::string_view::npos)return kNoLayer;
+        end=dot;
+        ++counters_.index_lookups;
+        if(const uint32_t found=LookupIn(ix,layers_,id.substr(0,dot));found!=kNoLayer)return found;
+    }
+}
+
+const std::vector<std::string_view>& Compositor::EmoteOwners() const {
+    Index();
+    auto& ix=layer_index_;
+    if(!ix.owners_valid) {
+        ++counters_.owner_rebuilds;
+        ix.owners.clear();
+        for(const auto& l:layers_)if(ValidEmoteRegistration(l))ix.owners.push_back(l.effect.emote_owner);
+        std::sort(ix.owners.begin(),ix.owners.end());
+        ix.owners.erase(std::unique(ix.owners.begin(),ix.owners.end()),ix.owners.end());
+        ix.owners_valid=true;
+    }
+    return ix.owners;
 }
 
 void Compositor::EffectiveRect(const Layer& l, float* ex, float* ey, float* ew,
@@ -374,6 +510,7 @@ bool Compositor::HomeLayerToTextPen(const std::string& text_id,
     Layer g;
     g.id = glyph_id;
     g.x = lx; g.y = ly; g.own_pos = true;
+    InvalidateLayerIndex();
     layers_.push_back(g);
     return true;
 }
@@ -381,6 +518,7 @@ bool Compositor::HomeLayerToTextPen(const std::string& text_id,
 std::string Compositor::HitLayer(float x, float y) const {
     std::vector<const Layer*> sorted;DrawOrderScratch scratch;
     BuildDrawList(sorted,scratch);
+    const TransformCache transforms(*this);
     for(auto it=sorted.rbegin();it!=sorted.rend();++it)
         if(ContainsPoint(**it,x,y))return (*it)->id;
     return {};
@@ -620,6 +758,10 @@ double Compositor::TextEnd(const Layer& l) {
 double Compositor::PendingTextMs(double now_ms) const {
     double end=now_ms;
     for(const auto& l:layers_) {
+        // TextEnd()==0 for layers without text tweens or glyphs (every E-mote
+        // part): skip their ancestor walk. For now_ms<0 a visible layer would
+        // still contribute max(now,0), so keep the full path there.
+        if(now_ms>=0 && (l.text_in.empty() || l.glyphs.empty()))continue;
         float x,y,a; bool visible;
         EffectiveRect(l,&x,&y,&a,&visible);
         if(visible && a>0) end=std::max(end,TextEnd(l));
@@ -630,6 +772,7 @@ double Compositor::PendingTextMs(double now_ms) const {
 bool Compositor::FinishText(double now_ms) {
     bool changed=false;
     for(auto& l:layers_) {
+        if(now_ms>=0 && (l.text_in.empty() || l.glyphs.empty()))continue;
         float x,y,a; bool visible;
         EffectiveRect(l,&x,&y,&a,&visible);
         const double remaining=TextEnd(l)-now_ms;
@@ -725,7 +868,7 @@ void Compositor::QueueTween(Tween tw, bool replace) {
     }
     bool found = false;
     for (auto &l : layers_) if (l.id == tw.id) { found = true; break; }
-    if (!found) { Layer g; g.id = tw.id; layers_.push_back(g); }
+    if (!found) { Layer g; g.id = tw.id; InvalidateLayerIndex(); layers_.push_back(g); }
     // Even zero-duration segments enter the queue, so a later segment can
     // resolve its implicit start from the preceding segment's final value.
     tweens_.push_back(tw);
@@ -838,7 +981,7 @@ bool Compositor::Update(double now_ms) {
         const double since = now_ms - tw.start_ms;
         if (since < tw.delay_ms) { ++it; continue; }
         Layer *target = nullptr;
-        for (auto &l : layers_) if (l.id == tw.id) { target = &l; break; }
+        if (const uint32_t found = FindLayer(tw.id); found != kNoLayer) target = &layers_[found];
         if (!target) { it = tweens_.erase(it); continue; }
         if (!tw.started) {
             tw.started = true;
@@ -893,6 +1036,7 @@ std::string Compositor::DescribeDrawList(size_t max_layers) const {
                       " tweens=" + std::to_string(tweens_.size()) +
                       " trans=" + std::to_string(trans_active_ ? 1 : 0) + " |";
     size_t n = 0;
+    const TransformCache transforms(*this);
     for (const Layer *l : sorted) {
         float ex, ey, ew, eh, ea; bool ev;
         EffectiveRect(*l, &ex, &ey, &ew, &eh, &ea, &ev);
@@ -911,6 +1055,7 @@ std::vector<std::string> Compositor::HitLayers(float x, float y) const {
     BuildDrawList(sorted,scratch);
     std::vector<std::string> ids;
     ids.reserve(sorted.size());
+    const TransformCache transforms(*this);
     for(auto it=sorted.rbegin();it!=sorted.rend();++it)
         if(ContainsPoint(**it,x,y))ids.push_back((*it)->id);
     return ids;
@@ -918,8 +1063,8 @@ std::vector<std::string> Compositor::HitLayers(float x, float y) const {
 
 Compositor::LayerInfo Compositor::GetLayerInfo(const std::string &id) const {
     LayerInfo info;
-    for (const auto &l : layers_) {
-        if (l.id != id) continue;
+    if (const uint32_t found = FindLayer(id); found != kNoLayer) {
+        const Layer &l = layers_[found];
         info.found = true;
         info.left = l.x;
         info.top = l.y;
@@ -931,7 +1076,6 @@ Compositor::LayerInfo Compositor::GetLayerInfo(const std::string &id) const {
         info.drag_t = l.drag_t;
         info.drag_r = l.drag_r;
         info.drag_b = l.drag_b;
-        break;
     }
     return info;
 }
@@ -1233,6 +1377,7 @@ bool Compositor::LoadImage(const std::string &id, const std::string &file) {
     l.tex_w = w; l.tex_h = h;
     l.w = (float)w; l.h = (float)h;
     l.z = 0;
+    InvalidateLayerIndex();
     layers_.push_back(l);
     Log(kLogDebug, "lyc: added " + id + " " + std::to_string(w) + "x" + std::to_string(h));
     return true;
@@ -1583,6 +1728,7 @@ bool Compositor::SetText(const std::string &id, const std::string &text,
     l.text_pen_x = pen_x;
     l.text_pen_y = pen_y;
     l.z = 100; // above scene layers
+    InvalidateLayerIndex();
     layers_.push_back(l);
     Log(kLogInfo, "SetText: " + id + " " + std::to_string(tex_w) + "x" +
                       std::to_string(tex_h) + " '" + text.substr(0, 24) + "'");
@@ -1648,6 +1794,7 @@ void Compositor::SetProps(const std::string &id,
     g.id = id;
     g.visible = true;
     g.z = 0;
+    InvalidateLayerIndex();
     layers_.push_back(g);
     SetProps(id, attrs);
 }
@@ -1661,6 +1808,7 @@ void Compositor::DeleteLayer(const std::string &id) {
         if (it->id == id ||
             it->id.compare(0, prefix.size(), prefix) == 0) {
             if (it->texture) glDeleteTextures(1, &it->texture);
+            InvalidateLayerIndex();
             it = layers_.erase(it);
         } else {
             ++it;
@@ -1677,6 +1825,7 @@ void Compositor::ReleaseGl() {
     for (auto &l : layers_) {
         if (l.texture) glDeleteTextures(1, &l.texture);
     }
+    InvalidateLayerIndex();
     layers_.clear();
     tweens_.clear();
     tween_set_.clear(); collecting_tweens_ = false;
@@ -1762,8 +1911,7 @@ void Compositor::Draw() {
     glEnable(GL_BLEND);
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
-    auto draw_leaf=[&](const Layer* l,float inherited,bool top_down) {
-        const auto transform=EffectiveTransform(*l);
+    auto draw_leaf=[&](const Layer* l,const Transform& transform,float inherited,bool top_down) {
         const float ea=transform.alpha/inherited;
         if (!transform.visible || ea<=0) return;
         if (!l->texture && l->glyphs.empty()) return; // placeholder: nothing to draw
@@ -1885,11 +2033,10 @@ void Compositor::Draw() {
             if(!transform.visible || transform.alpha<=0){++i;continue;}
             size_t next=i+1;
             if(l->effect.Active()) {
-                const auto prefix=l->id+".";
-                while(next<last && sorted[next]->id.compare(0,prefix.size(),prefix)==0)++next;
+                while(next<last && IsStrictDescendant(l->id,sorted[next]->id))++next;
                 const auto intermediate=shaders_.Begin(depth,stage_w_,stage_h_,target,top_down);
                 if(intermediate) {
-                    draw_leaf(l,transform.alpha,true);
+                    draw_leaf(l,transform,transform.alpha,true);
                     draw_range(i+1,next,depth+1,intermediate,true,transform.alpha);
                     LayerCoverage coverage;
                     const float det=transform.a*transform.d-transform.b*transform.c;
@@ -1922,10 +2069,14 @@ void Compositor::Draw() {
                     i=next;continue;
                 }
             }
-            draw_leaf(l,inherited,top_down);++i;
+            draw_leaf(l,transform,inherited,top_down);++i;
         }
     };
-    draw_range(0,sorted.size(),0,scene_fbo_,false,1);
+    {
+        // The layer table is read-only for the whole pass: memoize ancestors.
+        const TransformCache transforms(*this);
+        draw_range(0,sorted.size(),0,scene_fbo_,false,1);
+    }
     // Device-side draw ground truth: every 300 frames dump what actually
     // rendered (drawn/total + first samples with effective rects) so layout
     // bugs are observable from logcat alone.
@@ -2192,6 +2343,7 @@ bool Compositor::LoadImage(const std::string &id, const std::string &file) {
     l.tex_w = w; l.tex_h = h;
     l.w = (float)w; l.h = (float)h;
     l.z = 0;
+    InvalidateLayerIndex();
     layers_.push_back(l);
     return true;
 }
@@ -2250,6 +2402,7 @@ void Compositor::SetProps(const std::string &id,
     g.id = id;
     g.visible = true;
     g.z = 0;
+    InvalidateLayerIndex();
     layers_.push_back(g);
     SetProps(id, attrs);
 }
@@ -2261,6 +2414,7 @@ void Compositor::DeleteLayer(const std::string &id) {
     for (auto it = layers_.begin(); it != layers_.end();) {
         if (it->id == id ||
             it->id.compare(0, prefix.size(), prefix) == 0) {
+            InvalidateLayerIndex();
             it = layers_.erase(it);
         } else {
             ++it;
@@ -2302,13 +2456,14 @@ bool Compositor::SetText(const std::string &id, const std::string &text,
     l.x = 40.0f;
     l.y = (float)stage_h_ - (float)th - 60.0f;
     l.z = 100;
+    InvalidateLayerIndex();
     layers_.push_back(l);
     Log(kLogInfo, "SetText: " + id + " " + std::to_string(tw) + "x" +
                       std::to_string(th) + " '" + text.substr(0, 24) + "'");
     return true;
 }
-void Compositor::Shutdown() { layers_.clear(); present_cb_ = nullptr; }
-void Compositor::ReleaseGl() { ++revision_; layers_.clear(); tweens_.clear(); tween_set_.clear(); collecting_tweens_ = false; trans_active_ = false; gl_ready_ = false; }
+void Compositor::Shutdown() { InvalidateLayerIndex(); layers_.clear(); present_cb_ = nullptr; }
+void Compositor::ReleaseGl() { ++revision_; InvalidateLayerIndex(); layers_.clear(); tweens_.clear(); tween_set_.clear(); collecting_tweens_ = false; trans_active_ = false; gl_ready_ = false; }
 uint32_t Compositor::RenderStageMask(const std::string &, const std::vector<std::string> &) { return 0; }
 uint32_t Compositor::RenderStageMask(int, const std::vector<std::string> &) { return 0; }
 void Compositor::ReleaseStageMasks(const std::string &) {}

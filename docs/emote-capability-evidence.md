@@ -9,11 +9,10 @@
 全 E1–E17 的执行清单与 `implemented/synthetic/real/staticdecision/missing` 账本见
 [主计划顶部](emote-plan.md#execution-ledger)，各 E 原验收均保留；计划未全部完成。
 
-- **验证时点（本机合成与构建）**：`build-test` ctest **27/27**，`build-cgl` **29/29**
-  （`compositor_regressions` 连续 3 次通过）；`build-mac` / `build-android` /
+- **验证时点（本机合成与构建）**：`build-test` ctest **28/28**，`build-cgl` **30/30**
+  （`compositor_regressions` 连续 5 次通过）；`build-mac` / `build-android` /
   `build-consumer` / `build-consumer-android` 构建通过；Android **12 个入口**导出检查通过。
-  不代表真实游戏、设备或官方一致；导出/链接不等于 JNI 行为兼容。更早的 22/22、23/23、24/24、25/25
-  是此前时点，不与当前混用。
+  不代表真实游戏、设备或官方一致；导出/链接不等于 JNI 行为兼容。更早的 22/22、23/23、24/24、25/25、27/27（build-test）、29/29（build-cgl）是此前时点，不与当前混用。
 - **E1**：120 行逐槽表 + 240 DWORD 独立校验通过；完整 ABI 未知。mirror 三个函数
   （`InitMirrorControl` / `MatchMirrorVariable` / `ReflectVariableValue`）的新旧地址已核对为
   “入口 vs 内部证据范围”粒度不同，非冲突。
@@ -38,16 +37,34 @@
   临时目录，不进仓库）。无官方同状态逐像素验收。
 - **E10**：transition / immediate / profile / orbit 已接入 model/player（`emote_control.*`），
   mirror 三态已对齐，多 blink 时钟已修；clamp / stereo / eye edge / eyebrow nodes / mouth shape
-  未实现。真实游戏快照中未观察到眨眼（不判定存在与否）。
-- **E14**：Mac 读档复现路径（标题约第 1500 帧才可交互；点击 `1684,293@1560`、`390,260@1700`、
-  `806,497@1780`）与隔离存档目录规则见主计划账本。
+  未实现。Mac 真实游戏已观察到自动眨眼并拍到完整闭眼帧（见主计划顶部“增量补记”；不等于官方逐像素一致）。
+- **眨眼与 `shirome` 中段 type-0（分层）**：
+  - 静态/资产事实：`metadata.eyeControl`（say_6：label `face_eye_open`、`blinkFrameCount` 16、
+    interval 30–180）；`shirome` 节点 frameList 在闭眼键处为中段 type-0（`content=null`），
+    132 个模型中仅 `shirome` 命中（131 个模型各 2 个）。
+  - 实现/合成：`Sample()` 改为“type-0 后仍有有效帧则不绘制但保留姿态供子节点继承；尾部 HOLD 不变”。
+    **这是由资产结构推断的语义；官方静态事实中没有关于层 frameList 中段 type-0 的记录，不得写成官方已证。**
+  - 真实游戏（Mac 自研内核）：已观察到自动眨眼并拍到完整闭眼帧。
+  - 官方对照（手机 official，读 save0001，同场景不同帧/台词，非同变量逐像素）：say_6 脸/虹膜/红晕/
+    发型/领口/领结/手势视觉一致，官方可见眨眼；shi_36 官方该帧未出现，未对照；0138 未闭环。
+    手机存档备份在 `/Users/weiss/opencode/tn-saves/official-20261016-211827/`（不进仓库），
+    save0001 哈希前后一致。
+- **性能**：读档后 say_6+shi_36（783 层，159 层有纹理）Mac 约 11→58fps（不带快照区间；单机观察）；
+  根因 `Compositor::EffectiveTransform` 线性找祖先与 `PendingTextMs` 对无文字图层算 `EffectiveRect`，
+  已改惰性 id 索引 + 变换记忆 + 先排除无文字（AGENT.md §14，`tests/compositor_index_regressions.cpp`
+  用调用计数断言复杂度）。不是设备或官方性能结论。
+- **E14**：Mac 读档复现路径（游戏目录只读 + `--save-dir` 隔离副本；标题约第 1500 帧才可交互；
+  点击 `1684,293@1560`、`390,260@1700`、`806,497@1780`，已实测）与隔离存档目录规则见主计划账本。
 - **E15**：TagSync 只读查询（`EmoteModel::NextMotionSyncFrame`），Lua 不注册（官方样本无 skipToSync）；
   旧 `SyncFrame`/`SkipToSync` 为项目 legacy 扩展。**E16**：几何命中（quad / mesh / shape）+ 三角形容差修复；
   官方 Lua 只有 `isAnimating`，无 contains/hitTest 注册，项目 `contains`/`hitTest` 为扩展。
 - **仍缺**：官方内核同状态逐像素对照（手机，进行中）、0138 闭环、Android 宿主合同
   （官方壳与 Tyranor-Next 各自 Activity/插件）验收、插件重新构建发布（TyranorNext 内
-  `libartemis-clean.so` 仍是旧 v29，需更新 manifest `pluginVersion`）；E13 不启动（无 Windows 运行环境）；
-  E8 移动端压缩格式无样本。
+  `libartemis-clean.so` 仍是旧 v29，需更新 manifest `pluginVersion`；本轮按约定不发版）；
+  官方同状态（同变量同帧）逐像素对照、shi_36 与 0138 对照；低位 sync / cc / 屏障 anchor /
+  clampControl / stereo / eye edge / eyebrow nodes / mouth shape 未实现（降级加载并记录
+  `UnsupportedFeatures`）；E13 不启动（无 Windows 运行环境）；E8 移动端压缩格式无样本；
+  E6 真实 v2 body 样本缺；E7 无拆分样本。
 
 格式与行为细节见[格式证据](emote-format-evidence.md)（Z、rawMeshList、meshCombine、sync 位）。
 orbit 官方静态事实：首次 Progress 不消费 dt；整周期回到同一 index 不重发；tween 的
@@ -121,7 +138,7 @@ duration = `(index+1)*(T/N) - phase`（T 为周期，N 为段数，phase 为当�
   selector 公式/默认项、attrcomp 移除与 metadata.mirror 断言。
 - `tests/emote_timeline_regressions.cpp` 的 `BlinkClockTests` 包含并行控制器、
   大步长、enable 门控、加载重置与动画等待不受眨眼阻塞等断言；
-  二者随 `build-test` 27/27 通过（本机合成回归）。
+  二者随 `build-test` 28/28 通过（本机合成回归）。
 - `tests/emote_control_regressions.cpp`、`tests/emote_control_player_regressions.cpp`
   覆盖 transition / immediate（缺键 / 显式空 / 显式表）/ profile / orbit 的 core 与 player 接入；
   `tests/emote_mirror_regressions.cpp` 覆盖 mirror 三态与取负。

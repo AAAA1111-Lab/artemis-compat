@@ -262,9 +262,11 @@ Frame Sample(const PsbValue& list,double time) {
     // stayed drawn forever). 1 ms at 60 fps is far below one frame.
     const double frame_epsilon=1e-3;
     const PsbValue* last_live=nullptr;
-    for(const auto& f:list.array) {
+    size_t left_index=0;
+    for(size_t i=0;i<list.array.size();++i) {
+        const auto& f=list.array[i];
         const auto at=Num(f.At("time"));
-        if(at<=time+frame_epsilon){result.left=&f;result.time=at;if(Num(f.At("type"))!=0)last_live=&f;}
+        if(at<=time+frame_epsilon){result.left=&f;result.time=at;left_index=i;if(Num(f.At("type"))!=0)last_live=&f;}
         else {result.right=&f;break;}
     }
     if(!result.left || Num(result.left->At("type"))==0) {
@@ -276,6 +278,14 @@ Frame Sample(const PsbValue& list,double time) {
         if(last_live) {
             result.left=last_live;
             result.visible=true;
+            // A HOLD gap that a later live frame ends is authored absence, not
+            // the end of the motion: the node keeps its last pose for its
+            // descendants but draws no content of its own. (Asset evidence:
+            // an eye-white frame list ends its open pose exactly at the
+            // fully-closed variable value with a type-0 key and resumes only
+            // later; holding it drew the eye white above the closed lid.)
+            for(size_t i=left_index+1;i<list.array.size();++i)
+                if(Num(list.array[i].At("type"))!=0){result.visible=false;break;}
         } else {
             result.visible=false;
         }
@@ -1587,12 +1597,16 @@ bool EmoteScene::Render(Compositor& c,const std::string& id,double frame,
         std::map<std::string,std::pair<float,float>> centers;
         std::map<std::string,std::vector<std::string>> sources_by_label;
         std::map<std::string,std::string> container_keys;
-        for(const auto& pl:c.Layers()) {
-            if(pl.id.size()<7 || pl.id.compare(pl.id.size()-7,7,".000000")!=0)continue;
-            float ex=0,ey=0,ew=0,eh=0,ea=0;bool ev=false;
-            c.EffectiveRect(pl,&ex,&ey,&ew,&eh,&ea,&ev);
-            if(!ev)continue;
-            centers[pl.id]={ex+ew*0.5f,ey+eh*0.5f};
+        {
+            // Read-only pass over every layer: memoize ancestor transforms.
+            const Compositor::TransformCache transforms(c);
+            for(const auto& pl:c.Layers()) {
+                if(pl.id.size()<7 || pl.id.compare(pl.id.size()-7,7,".000000")!=0)continue;
+                float ex=0,ey=0,ew=0,eh=0,ea=0;bool ev=false;
+                c.EffectiveRect(pl,&ex,&ey,&ew,&eh,&ea,&ev);
+                if(!ev)continue;
+                centers[pl.id]={ex+ew*0.5f,ey+eh*0.5f};
+            }
         }
         for(const auto& l:layers) {
             if(l.label.empty() || !current.count(id+l.key))continue;

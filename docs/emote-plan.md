@@ -10,17 +10,17 @@
 
 ### 验证时点（本机合成与构建验证）
 
-- `build-test` ctest **27/27**；`build-cgl` ctest **29/29**（`compositor_regressions` 连续 3 次通过）。
+- `build-test` ctest **28/28**；`build-cgl` ctest **30/30**（`compositor_regressions` 连续 5 次通过）。
 - `build-mac`、`build-android`、`build-consumer`、`build-consumer-android` 构建通过；
   `tools/check_android_exports.py` 的 Android **12 个入口**导出检查通过；`git diff --check` 通过。
 - 边界：以上是本机合成回归与构建/导出/链接验证，**不代表真实游戏、设备或官方一致**；
   Android 交叉产物不能在 Mac 运行，导出/链接成功不等于 JNI 行为兼容。更早的 22/22、23/23、
-  24/24、25/25 等是此前时点，不与当前混用。
+  24/24、25/25、27/27（build-test）、29/29（build-cgl）等是此前时点，不与当前混用。
 
 ### 验收账本
 
 - [x] E1 槽表归档与独立字节校验：120 行逐槽表 / 240 DWORD 校验；mirror 三个函数地址已核对为“入口 vs 内部证据范围”粒度不同、非冲突；完整 ABI 未知保留。
-- [x] E4/E11 分数灰度、tint、模型镜像位已有代码；`build-cgl` 29/29（含 compositor 回归）覆盖离屏 CGL 像素断言，窗口/设备观感未补。
+- [x] E4/E11 分数灰度、tint、模型镜像位已有代码；`build-cgl` 30/30（含 compositor 回归）覆盖离屏 CGL 像素断言，窗口/设备观感未补。
 - [x] E5 决策 A：`setOuterForce`/`setOuterRot` 专用校验 + unsupported 代理已实现；不模拟物理。
 - [x] E6 LZ4 校验加固、E10 多 blink 时钟修复、E14 隔离采集工具与 Mac 读档复现路径、E15 TagSync 只读查询（Lua 不注册）已落入当前源码。
 - [x] E10 逐键表、E12 不暴露 Lua、E13 可选不启动、E17 按需延期的决策边界已记录。
@@ -40,20 +40,20 @@
 | E | implemented | synthetic | real | staticdecision | missing / 下一步（保留原验收要求） |
 |---|---|---|---|---|---|
 | E1 | 槽表/差异归档，非 DLL bridge | 120 行逐槽表 + 240 DWORD 独立校验通过 | 无动态 ABI 验证 | player 95（含析构）+ device 25；18 个记录名称；mirror 三函数入口 vs 内部范围已核对 | 完整签名/多数名称/宿主映射未知；逐差异回归或不实现结论仍需跟进 |
-| E2 | ordered pair 控制器（second 聚合、getter 分离、有限性）；mirror 三态（有效 = metadata XOR 用户，`Mirror` getter 返回用户状态）与 `variableMatchList` 字节子串取负 | emote_regressions / emote_mirror_regressions 随 27/27 通过 | 缺匹配变量真实模型对照 | ordered pair、variableMatchList 消费、mirror 三态为官方静态事实；`setMirror` 是项目扩展（官方样本 Lua 无注册） | 反序/共用 label/ease 与最终混合的官方对照；mirror 与 eye/selector/blink 覆盖顺序为本地策略未证；stereovision 未做 |
-| E3 | flags bit0=0 清全部、bit1 私有差分（非 sequential）；Step/Skip/Pass 按官方静态语义；独立 `setQueuing`/`getQueuing` | emote_timeline_regressions 随 27/27 通过 | 缺官方/插件同调用轨迹 | bit1 非 sequential、Step 不调用 Progress、Pass 20 帧淡出已证 | `PlayingTimelineFlagsAt` 仍返回 stored flags（官方 getter 为 `|1`，未改，属已知差异）；保留三处结论与真实轨迹要求 |
-| E4 | float 灰度与像素路径 | build-cgl 29/29（compositor 回归连续 3 次）含分数灰度/tint 断言 | 当前窗口/设备观感未补 | 无新增等价结论 | 保留 ANGLE 路径及必要观感复核 |
+| E2 | ordered pair 控制器（second 聚合、getter 分离、有限性）；mirror 三态（有效 = metadata XOR 用户，`Mirror` getter 返回用户状态）与 `variableMatchList` 字节子串取负 | emote_regressions / emote_mirror_regressions 随 28/28 通过 | 缺匹配变量真实模型对照 | ordered pair、variableMatchList 消费、mirror 三态为官方静态事实；`setMirror` 是项目扩展（官方样本 Lua 无注册） | 反序/共用 label/ease 与最终混合的官方对照；mirror 与 eye/selector/blink 覆盖顺序为本地策略未证；stereovision 未做 |
+| E3 | flags bit0=0 清全部、bit1 私有差分（非 sequential）；Step/Skip/Pass 按官方静态语义；独立 `setQueuing`/`getQueuing` | emote_timeline_regressions 随 28/28 通过 | 缺官方/插件同调用轨迹 | bit1 非 sequential、Step 不调用 Progress、Pass 20 帧淡出已证 | `PlayingTimelineFlagsAt` 仍返回 stored flags（官方 getter 为 `|1`，未改，属已知差异）；保留三处结论与真实轨迹要求 |
+| E4 | float 灰度与像素路径 | build-cgl 30/30（compositor 回归连续 5 次）含分数灰度/tint 断言 | 当前窗口/设备观感未补 | 无新增等价结论 | 保留 ANGLE 路径及必要观感复核 |
 | E5 | 专用 `setOuterForce`/`setOuterRot` 校验后返回 false+reason；hair/bust 仅记录 | runtime 定向通过 | 无物理逐帧对照 | 选 A，明确不模拟；startWind 不被当成已实现模拟 | 保留决策依据；若转 B/C 需真实模型逐帧截图，不扩写未知物理单位/公式 |
 | E6 | seed/v2 body、MDF/LZ4；LZ4 header/block/content 校验与边界加固 | psb_encrypted_regressions 合成坏流/校验用例 | 缺真实 v2 body 样本 | FilterTexture 为纹理 callback 路径，不是整包输出已证 | 真实加密模型加载；结构过滤范围与坏 seed/v2 错误歧义保留 |
 | E7 | 单文件路径；多文件明确拒绝 | 无拆分一致性夹具 | 缺拆分样本 | 合并/附加查找均为候选方案 | 取得样本，定义重编号/冲突/原子失败，拆分与合并模型渲染一致 |
 | E8 | 桌面格式/图集/mip level 0 | 现有合成块/裁切断言 | 移动格式（ETC1/PVRTC）无样本 | ETC1/PVRTC 继续拒绝 | 补移动样本及色序/alpha/裁切官方像素对照，不将无样本当全部不需要 |
-| E9 | 有效 Z 通道（去 label hacks）；完整 affine + shape leaf；warped mask source；meshSync 有限作用域；meshCombinator core + 预算（总 64 MiB / 单 8 MiB / 4096 条）+ scene 接入；同域 meshCombine（combinator 优先于 bp）；降级加载并记录 UnsupportedFeatures（低位 sync、cc、屏障 anchor 补偿、异域等不应用）；图集解码缓存；stage 蒙版缓存按 owner + 解析源集合 | compositor_regressions（含双 owner、同标签左右源）、combinator scene 回归随 29/29 / 27/27 通过 | 真实 132 个 fg 模型 DecodePsb / Model / Player Load 全部成功（仅加载级）；每个模型命中 clampControl.type0/1、meshSync.lowChannels、meshCombine.fallback，131 个有 timeline.openEnded；`EmoteScene::Load` 约 4.2s→约 50ms；Mac 读档 say_6/shi_36 眼睛虹膜/高光/红晕恢复（对比图不进仓库） | Z 有限静态 review；屏障 anchor 补偿尚未恢复；ancestor meshCombine 研究 | 曲线/模板/粒子、降级项的官方对照、最终 GL/官方同状态逐像素验收；不关闭 E9 |
-| E10 | transition / immediate / profile / orbit 已接入 model/player（`emote_control.*`）；mirror 三态已对齐；blink/selector/attrcomp 子集；多 blink 时钟修复 | emote_control_regressions / emote_control_player_regressions / emote_mirror_regressions 随 27/27 通过 | 自然眨眼/选项及新增控制器官方动态对照缺；真实游戏快照中未观察到眨眼（不判定存在与否） | transition/immediate/clamp/eyebrow/mouth/orbit/profile/精确 face 默认名已 official-runtime-static-confirmed，project-support-separate | clamp（type0 未知 / type1 圆投影）、stereo、eye edge、eyebrow nodes、mouth shape 未实现；按能力表补算法/实现；不能排期＝动态兼容 |
-| E11 | MODULATE2X tint、metadata.mirror | build-cgl 29/29 数值/GL 像素断言 | 当前镜像/颜色官方观感未补 | mirror 与 mirrorControl 分开 | RGB/alpha 与目标模型朝向复核 |
+| E9 | 有效 Z 通道（去 label hacks）；完整 affine + shape leaf；warped mask source；meshSync 有限作用域；meshCombinator core + 预算（总 64 MiB / 单 8 MiB / 4096 条）+ scene 接入；同域 meshCombine（combinator 优先于 bp）；降级加载并记录 UnsupportedFeatures（低位 sync、cc、屏障 anchor 补偿、异域等不应用）；图集解码缓存；stage 蒙版缓存按 owner + 解析源集合 | compositor_regressions（含双 owner、同标签左右源）、combinator scene 回归随 30/30 / 28/28 通过 | 真实 132 个 fg 模型 DecodePsb / Model / Player Load 全部成功（仅加载级）；每个模型命中 clampControl.type0/1、meshSync.lowChannels、meshCombine.fallback，131 个有 timeline.openEnded；`EmoteScene::Load` 约 4.2s→约 50ms；Mac 读档 say_6/shi_36 眼睛虹膜/高光/红晕恢复（对比图不进仓库）；783 层读档场景约 11→58fps（不带快照区间）；shirome 中段 type-0 不绘制为资产推断语义，无官方静态证据 | Z 有限静态 review；屏障 anchor 补偿尚未恢复；ancestor meshCombine 研究 | 曲线/模板/粒子、降级项的官方对照、最终 GL/官方同状态逐像素验收；不关闭 E9 |
+| E10 | transition / immediate / profile / orbit 已接入 model/player（`emote_control.*`）；mirror 三态已对齐；blink/selector/attrcomp 子集；多 blink 时钟修复 | emote_control_regressions / emote_control_player_regressions / emote_mirror_regressions 随 28/28 通过 | 自然眨眼/选项及新增控制器官方动态对照缺；Mac 真实游戏已观察到自动眨眼并拍到完整闭眼帧（say_6，eyeControl label face_eye_open，blinkFrameCount 16，interval 30–180）；手机官方可见眨眼，但未做同状态逐像素对照 | transition/immediate/clamp/eyebrow/mouth/orbit/profile/精确 face 默认名已 official-runtime-static-confirmed，project-support-separate | clamp（type0 未知 / type1 圆投影）、stereo、eye edge、eyebrow nodes、mouth shape 未实现；按能力表补算法/实现；不能排期＝动态兼容 |
+| E11 | MODULATE2X tint、metadata.mirror | build-cgl 30/30 数值/GL 像素断言 | 当前镜像/颜色官方观感未补 | mirror 与 mirrorControl 分开 | RGB/alpha 与目标模型朝向复核 |
 | E12 | 自有 EmoteScene 求值，不公开 native 结构 | 无 native ABI 用例 | 无新增公开接口需求实证 | 保留不暴露 Lua 决策 | native 输出结构/签名未知；若有调用先补参数/返回使用证据，非结构等价结项 |
 | E13 | 不启动可选动态工具（无 Windows 运行环境） | 无真实轨迹 diff | Windows/D3D9 参照环境缺 | 本轮选择不启动，可选决策不是 diff 通过 | 若启动仍需真实会话轨迹无未解释差异及工具纳入 tools；不阻塞可独立项 |
-| E14 | save-dir/frames/timeout/completion 工具与精确 HIDE/probe；Mac 读档复现路径（见下） | 工具 selftests（`tools/test_emote_validation.py`） | 独立 savedir host 标题 1200 帧/exit0 无立绘；Mac 读档复现 say_6/shi_36 双立绘；newgame 2600 被 name modal 超时 | phone 官方状态待用户准备；不据此阻塞整个 goal | 原矩阵全项/立绘与流畅对话/官方同状态逐像素对照（手机，进行中）、0138、性能与设备/JNI；超时不算流畅通过 |
-| E15 | TagSync 只读查询（`EmoteModel::NextMotionSyncFrame`），Lua 不注册；旧 `SyncFrame`/C++ `SkipToSync` 为项目 legacy 扩展 | emote_sync_regressions 随 27/27 通过 | 真实等待/同步流程未验 | Android Lua 无 skipToSync（官方样本无注册）；native 非 loop 查 tag(type1,time>=current,content.sync)，fallback lastTime，无 selfSyncTime；eventwait 与 IsAnimating 分离 | 真实对话不挂起/不提前；旧三来源条文保留但前提被推翻，不再照搬实现 |
+| E14 | save-dir/frames/timeout/completion 工具与精确 HIDE/probe；Mac 读档复现路径（见下） | 工具 selftests（`tools/test_emote_validation.py`） | 独立 savedir host 标题 1200 帧/exit0 无立绘；Mac 读档复现 say_6/shi_36 双立绘；newgame 2600 被 name modal 超时 | phone 官方状态待用户准备；不据此阻塞整个 goal | 原矩阵全项/立绘与流畅对话/官方同状态逐像素对照（手机，进行中；已有 say_6 同场景不同帧的视觉一致观察，shi_36 未对照）、0138、设备性能与设备/JNI（Mac 783 层读档场景约 58fps 为单机观察）；超时不算流畅通过 |
+| E15 | TagSync 只读查询（`EmoteModel::NextMotionSyncFrame`），Lua 不注册；旧 `SyncFrame`/C++ `SkipToSync` 为项目 legacy 扩展 | emote_sync_regressions 随 28/28 通过 | 真实等待/同步流程未验 | Android Lua 无 skipToSync（官方样本无注册）；native 非 loop 查 tag(type1,time>=current,content.sync)，fallback lastTime，无 selfSyncTime；eventwait 与 IsAnimating 分离 | 真实对话不挂起/不提前；旧三来源条文保留但前提被推翻，不再照搬实现 |
 | E16 | 几何命中（quad / mesh / shape）+ 三角形容差修复；stage full-affine / shape leaf；`contains`/`hitTest` 为项目扩展 | 合成定向通过；非官方双 API 等价 | 真实点击/遮挡/坐标官方对照缺 | 官方 Lua 只有 `isAnimating`，无 contains/hitTest 注册；native Contains 为 shape type1/geometry | 点边顶点/仿射边界；官方 native 几何/坐标与项目扩展分别验收，不假称官方双 API 差别已实现 |
 | E17 | ARCV/onLoad 重建安全网，不含 player 精确状态序列化 | 现有存档 callback 断言不覆盖 emote 恢复一致 | 需求及表情/timeline/blend 恢复证据缺 | 按需延期，不声称所有游戏不需要 | 按需求验证表达变量/timeline/blend、进度/首帧；原“官方一致或明确不需求”门槛不删 |
 
@@ -82,8 +82,46 @@
 - 诊断：`ARTC_EMOTE_DUMP` 记录 player 命令与合成状态，供 `tools/emote_preview` 回放；
   仅为开发诊断，不是官方轨迹。
 
+### 增量补记（性能 / 眼睛与眨眼 / 官方内核对照；按证据层分列，互不代证）
+
+**合成回归与实现（`implemented` + `synthetic`）**
+
+- **读档场景性能**：读档后 say_6+shi_36 场景（783 层，159 层有纹理）Mac 自研内核由约 11fps
+  提升到约 58fps（**不带快照区间**实测；带快照的区间会偏低，不作比较基准）。根因：
+  `Compositor::EffectiveTransform` 按 id 线性查找祖先，以及 `PendingTextMs` 对无文字图层也
+  计算 `EffectiveRect`。修复为惰性 id 索引 + 变换记忆 + 先排除无文字图层；失效规则写在
+  AGENT.md §14。新增 `tests/compositor_index_regressions.cpp`，以调用计数断言复杂度（含等价与
+  失效用例）。`EmoteScene::Load` 约 4.2s → 约 50ms（图集解码缓存）。这是单机单场景的帧率
+  观察，**不是**设备或流畅对话验收。下文 E9 历史记录里“排序键构建中的祖先扫描性能”关注点
+  已由本项针对 783 层场景处理，其他场景未测。
+- **蒙版缓存缺陷**（左右眼共用蒙版源、stage 蒙版纹理 key 跨 owner 碰撞）已修（提交 e2bf7ca）。
+- **眨眼闭眼帧多余淡紫新月**：根因是 `shirome` 节点 frameList 在闭眼键处为中段 type-0
+  （`content=null`），而旧 `Sample()` 把所有 type-0 当尾部 HOLD 继续绘制。现改为“type-0 后仍有
+  有效帧则不绘制、但保留姿态供子节点继承；尾部 HOLD 不变”。**这是由资产结构推断的语义；官方
+  静态事实中没有关于层 frameList 中段 type-0 的记录，不得写成官方已证。**132 个模型中仅
+  `shirome` 命中（131 个模型各 2 个）。
+
+**真实游戏观察（`real`，Mac 自研内核；不等于官方一致）**
+
+- 眨眼来自 `metadata.eyeControl` 自动眨眼（say_6：label `face_eye_open`、`blinkFrameCount` 16、
+  interval 30–180），Mac 真实游戏已观察到并拍到完整闭眼帧；此前“快照中未观察到眨眼”的记录
+  已被取代（该旧记录本就“不判定存在与否”）。
+
+**官方内核对照（`real` 的另一侧，手机 official，非同变量逐像素）**
+
+- 读 save0001，**同场景但不同帧/台词**：say_6 的脸、虹膜、红晕、发型、领口、领结、手势视觉
+  一致；官方可见眨眼。shi_36 在官方该帧未出现，**未对照**；0138 未闭环。这是人工视觉比对，
+  **不是**同变量同帧的逐像素验收，不得据此关闭 E9/E10/E14。
+- 手机存档已备份到 `/Users/weiss/opencode/tn-saves/official-20261016-211827/`（不进仓库）；
+  save0001 哈希运行前后一致，autosave / system.dat 因运行变化属预期。
+
 ### 仍缺（保留原验收要求）
 
+0. （增量）官方**同状态（同变量、同帧）**逐像素对照；shi_36 与 0138 对照；Android 宿主合同
+   （官方壳与 Tyranor-Next 的 Activity/JNI）实机验收；插件重新构建发布（本轮按约定不发版）；
+   低位 sync / cc / 屏障 anchor / clampControl / stereo / eye edge / eyebrow nodes / mouth shape
+   未实现（降级加载并记录 `UnsupportedFeatures`）；E13 不启动；E8 移动端压缩格式无样本；
+   E6 真实 v2 body 样本缺；E7 无拆分样本。
 1. 官方内核同状态逐像素对照（手机，进行中）；0138 闭环。
 2. Android 宿主合同验收：官方壳与 Tyranor-Next 各自的 Activity/插件分别验证；
    导出/链接/构建通过不等于 JNI 行为兼容（见 `docs/embedding.md`）。
@@ -618,6 +656,13 @@ krkrsdl3 对照：其只支持 `RL`/`none` 与 RGBA8/调色板展开，格式上
 - 尾部 HOLD 语义：动作用尽后**保持上一有效帧继续绘制**（官方立绘长时间常驻），
   并用 1ms 帧时间容差消除嵌套时钟浮点误差（此前会冻结在 60.999 帧、恰好
   掩盖该语义）。
+- 中段 HOLD 缺口：被后续有效帧结束的 type-0 帧是作者设定的“此区间不画”——节点保留
+  上一有效姿态供子节点继承，但自身不绘制（`Sample` 对其后仍有有效帧的 HOLD 置
+  `visible=false`）。依据是资产本身：say_6 等 131 个 fg 模型里仅 `shirome`（眼白）帧表在
+  `face_eye_open` 完全闭合值（时间 20）处放 type-0 并到 41 才恢复，旧实现保持绘制导致闭眼帧
+  眼白新月；无官方静态证据，官方观感仅作旁证（见 `ARTC_EMOTE_HIDE=tex#000/0145` 定位）。
+  尾部 HOLD（其后再无有效帧）语义不变。预览工具新增 `--variable-late`，因为
+  表情 timeline 的 t=0 瞬时键会覆盖提前设置的 `--variable`。
 - 真机"点击没反应"实为上面的 3fps 回归；"画面被缩小/切后台重启"属于宿主的
   窗口尺寸与进程策略（引擎 stage 固定 1920x1080，本机快照已确认），待设备
   接回后在 TyranorNext 侧核对。
@@ -635,7 +680,7 @@ krkrsdl3 对照：其只支持 `RL`/`none` 与 RGBA8/调色板展开，格式上
 **当前状态**：transition / immediate / profile / orbit 已接入 model/player（`emote_control.*`，
 `emote_control_regressions` / `emote_control_player_regressions`），mirror 三态已对齐，
 多 blink 独立时钟/大步长已修；clamp / stereo / eye edge / eyebrow nodes / mouth shape
-未实现。`build-test` 27/27 为本机合成回归，真实游戏快照中未观察到眨眼（不判定存在与否）。
+未实现。`build-test` 28/28 为本机合成回归，Mac 真实游戏已观察到自动眨眼并拍到完整闭眼帧（见主计划顶部“增量补记”；不等于官方逐像素一致）。
 逐键状态见[能力证据表](emote-capability-evidence.md#2-e10逐键判定表)。
 官方 SO normal consumers 已确认 transition/immediate/clamp/eyebrow/mouth/orbit/profile
 与精确 face 默认名的运行时归属，改标 `official-runtime-static-confirmed`，项目支持另列。
@@ -764,6 +809,10 @@ diff 通过；不阻塞其他独立项。若重启，仍须满足下方真实会
   **该次没有立绘**，不能完成本表 E-mote 场景验收。
 - **newgame 2600** 受取名 name modal 阻塞并超时，不能算流畅游戏/对话通过。
   需受控跨过 modal 后继续原矩阵，不能把标题页运行与游戏主流程合并报喜。
+- **读档复现路径（已实测）**：游戏目录只读，用 `--save-dir` 指向隔离副本；标题约第 1500 帧才可交互；
+  点击 `1684,293@1560`、`390,260@1700`、`806,497@1780`（stage 像素@帧号）。读档 say_6+shi_36
+  场景（783 层）Mac 约 58fps（不带快照区间），眨眼闭眼帧已拍到；详见顶部“增量补记”。
+  官方手机 save0001 对照为同场景不同帧的视觉比对，shi_36 未对照，仍不是逐像素验收。
 - 官方内核同状态逐像素对照（手机）进行中，0138 未闭环；不把整个 E1–E17 goal 标为 blocked。
   Mac 读档复现路径与隔离存档目录规则见顶部账本；此文档不操作设备、游戏或存档。
 - 最后代码稳定后重跑下列原命令及 detail DoD，并记录二进制/源码、实际命令、
