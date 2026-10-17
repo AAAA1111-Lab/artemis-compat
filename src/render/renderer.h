@@ -21,6 +21,19 @@ class Renderer {
 public:
     // Create EGL/GLES context bound to the native window.
     bool Init(void *native_window);
+    // Window loss (background / surface recreation): unbind the current EGL
+    // surface but keep the EGL context, so the engine's GPU resources (layer
+    // textures, glyph pages, FBOs) survive and the game resumes in place
+    // instead of re-booting. Returns true when the context was preserved;
+    // false when it had to be destroyed (the caller must then rebuild its GL
+    // state via the boot chain).
+    bool ReleaseSurface();
+    // True while a live EGL context exists that can still host previously
+    // created GPU resources.
+    bool ContextAlive() const;
+    // The most recent Init re-bound a surviving context (true) instead of
+    // building a fresh one (false — the previous GPU state is gone).
+    bool ContextReused() const { return context_reused_; }
     // Called when the window geometry changes (in-place relayout of the same
     // surface, e.g. a buffer-geometry change the activity never reports):
     // re-applies the stage viewport so the letterbox follows the new size.
@@ -52,10 +65,14 @@ private:
     EGLDisplay display_ = EGL_NO_DISPLAY;
     EGLSurface surface_ = EGL_NO_SURFACE;
     EGLContext context_ = EGL_NO_CONTEXT;
+    EGLConfig cfg_ = nullptr;   // kept so a surface can be rebuilt on the context
     void *window_ = nullptr;
+    bool CreateContext();                       // display + config + context
+    bool CreateSurface(ANativeWindow *window);  // EGLSurface on the context
 #endif
     bool ready_ = false;
     bool swap_paced_ = false;   // eglSwapInterval(1) applied successfully
+    bool context_reused_ = false; // last Init re-bound a surviving context
     int width_ = 0, height_ = 0;
     float vp_x_ = 0, vp_y_ = 0, vp_w_ = 1, vp_h_ = 1;   // viewport in surface px
     int stage_w_ = 1280, stage_h_ = 720;

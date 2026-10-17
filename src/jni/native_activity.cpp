@@ -439,16 +439,46 @@ void EngineThreadMain(ANativeActivity *activity) {
             lost = g_state.lost_window;
             g_state.lost_window = nullptr;
         }
-        if (wanted != current) {
-            renderer.Shutdown();
-            ctx->compositor().ReleaseGl();  // old context is gone; textures die with it
-            booted = false;                 // re-boot the scene on the new context
-            drawn_rev = ~0ull;              // new surface: force a first draw
-            ctx->ResetSession();
+        // Reconcile the render surface with the activity's window. A window
+        // change is a *surface* change, not an engine reset: the EGL context
+        // and the engine session (Lua state + compositor layers) are kept, so
+        // returning from the background resumes in place instead of re-running
+        // the boot chain. Only a genuinely lost context falls back to re-boot.
+        const bool window_changed = (wanted != current);
+        if (wanted == nullptr) {
+            // Window gone (background / surface destroyed). Stop swapping into
+            // the dead window but keep the context + session alive, and suspend
+            // the clock and audio so the game neither advances nor plays on
+            // while it is hidden.
+            if (renderer.Ready()) {
+                renderer.ReleaseSurface();
+                if (ctx->Started()) {
+                    ctx->lua().PauseClock();
+                    ctx->lua().PauseAudio();
+                }
+            }
+        } else if (window_changed) {
+            if (current) renderer.ReleaseSurface();  // unbind the old EGL surface
+            renderer.Init(wanted);                   // rebind on the surviving context
+            // ContextReused()==false means the GPU state did not survive (a
+            // fresh context was built): rebuild the scene via the boot chain,
+            // the historical behaviour.
+            if (renderer.Ready() && !renderer.ContextReused() && booted) {
+                ctx->compositor().ReleaseGl();
+                ctx->ResetSession();
+                booted = false;
+            }
+            if (!renderer.Ready())
+                LOGE("renderer init failed: %s", renderer.LastError().c_str());
+            if (booted && renderer.Ready() && ctx->Started()) {
+                ctx->lua().ResumeClock();           // undo the background suspend
+                ctx->lua().ResumeAudio();
+            }
+            drawn_rev = ~0ull;                      // new surface: force a first draw
+        }
+        if (window_changed) {
             if (current) ANativeWindow_release(current);
             current = wanted;
-            if (current && !renderer.Init(current))
-                LOGE("renderer init failed: %s", renderer.LastError().c_str());
             std::lock_guard<std::mutex> lk(g_state.mutex);
             g_state.current_window = current;
         }

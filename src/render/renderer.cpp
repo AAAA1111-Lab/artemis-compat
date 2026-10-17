@@ -14,10 +14,9 @@ namespace artc {
 
 #if defined(__ANDROID__) && defined(ARTC_HAS_GLES)
 
-bool Renderer::Init(void *native_window) {
-    auto *window = static_cast<ANativeWindow *>(native_window);
-    Shutdown(); // clean slate if re-initializing
-
+// Build display / config / context from scratch. Only needed when no context
+// survives (first init, or the driver dropped it while backgrounded).
+bool Renderer::CreateContext() {
     display_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (display_ == EGL_NO_DISPLAY) { last_error_ = "eglGetDisplay failed"; return false; }
     if (!eglInitialize(display_, nullptr, nullptr)) { last_error_ = "eglInitialize failed"; return false; }
@@ -27,28 +26,65 @@ bool Renderer::Init(void *native_window) {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
         EGL_NONE};
-    EGLConfig cfg = nullptr;
     EGLint num = 0;
-    if (!eglChooseConfig(display_, cfg_attrs, &cfg, 1, &num) || num < 1) {
+    if (!eglChooseConfig(display_, cfg_attrs, &cfg_, 1, &num) || num < 1) {
         last_error_ = "eglChooseConfig failed";
         return false;
     }
     const EGLint ctx_attrs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE};
-    context_ = eglCreateContext(display_, cfg, EGL_NO_CONTEXT, ctx_attrs);
+    context_ = eglCreateContext(display_, cfg_, EGL_NO_CONTEXT, ctx_attrs);
     if (context_ == EGL_NO_CONTEXT) { last_error_ = "eglCreateContext failed"; return false; }
-    surface_ = eglCreateWindowSurface(display_, cfg, window, nullptr);
-    if (surface_ == EGL_NO_SURFACE) { last_error_ = "eglCreateWindowSurface failed"; return false; }
-    if (!eglMakeCurrent(display_, surface_, surface_, context_)) {
-        last_error_ = "eglMakeCurrent failed";
+    return true;
+}
+
+bool Renderer::CreateSurface(ANativeWindow *window) {
+    surface_ = eglCreateWindowSurface(display_, cfg_, window, nullptr);
+    if (surface_ == EGL_NO_SURFACE) {
+        last_error_ = "eglCreateWindowSurface failed";
         return false;
     }
+    return true;
+}
 
-    // Frame pacing (T3-3): swap blocks until the next vsync, replacing the
-    // old fixed 16 ms sleep (which drifts against the display clock and
-    // wastes wakeups). ARTC_SWAP_INTERVAL=0 is the documented device-level
-    // fallback for drivers where the interval is unreliable; the host then
-    // paces itself with a sleep. Re-applied here on every context rebuild
-    // (window loss / re-init), which is where the interval resets.
+bool Renderer::Init(void *native_window) {
+    auto *window = static_cast<ANativeWindow *>(native_window);
+    context_reused_ = false;
+
+    // A surviving context (window loss / background) is re-used as-is: its
+    // textures and FBOs are exactly what lets the game resume in place rather
+    // than re-running the boot chain.
+    if (display_ == EGL_NO_DISPLAY || context_ == EGL_NO_CONTEXT) {
+        Shutdown(); // clean slate
+        if (!CreateContext()) { Shutdown(); return false; }
+    } else {
+        context_reused_ = true;
+    }
+
+    if (surface_ != EGL_NO_SURFACE) {   // rebinding: drop the old surface first
+        eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, context_);
+        eglDestroySurface(display_, surface_);
+        surface_ = EGL_NO_SURFACE;
+    }
+    if (!CreateSurface(window)) { Shutdown(); return false; }
+    if (eglMakeCurrent(display_, surface_, surface_, context_) != EGL_TRUE) {
+        // The driver reclaimed the context while it had no surface
+        // (EGL_CONTEXT_LOST). Rebuild from scratch; ContextReused()==false
+        // tells the host that the previous GPU state is gone.
+        Shutdown();
+        if (!CreateContext() || !CreateSurface(window)) { Shutdown(); return false; }
+        if (eglMakeCurrent(display_, surface_, surface_, context_) != EGL_TRUE) {
+            last_error_ = "eglMakeCurrent failed";
+            Shutdown();
+            return false;
+        }
+    }
+
+    // Frame pacing (T3-3): swap blocks until the next vsync, replacing the old
+    // fixed 16 ms sleep (which drifts against the display clock and wastes
+    // wakeups). ARTC_SWAP_INTERVAL=0 is the documented device-level fallback
+    // for drivers where the interval is unreliable; the host then paces itself
+    // with a sleep. The interval is a surface attribute, so it is (re-)applied
+    // on every surface bind here.
     const char *swap_env = std::getenv("ARTC_SWAP_INTERVAL");
     if (!(swap_env && std::strcmp(swap_env, "0") == 0)) {
         const EGLBoolean ok = eglSwapInterval(display_, 1);
@@ -64,13 +100,40 @@ bool Renderer::Init(void *native_window) {
     width_ = ANativeWindow_getWidth(window);
     height_ = ANativeWindow_getHeight(window);
     ready_ = true;
-    Log(kLogInfo, "renderer: GLES2 ready " + std::to_string(width_) + "x" +
-                      std::to_string(height_));
-    // Re-apply the stage mapping when re-initializing on a new window: the
-    // stage outlives the window (Shutdown keeps stage_set_/sidecut_), and the
-    // engine only calls SetStage on (re)boot, not on window changes.
+    Log(kLogInfo, std::string("renderer: GLES2 ready ") + std::to_string(width_) +
+                      "x" + std::to_string(height_) +
+                      (context_reused_ ? " (context reused)" : ""));
+    // Re-apply the stage mapping: the stage outlives the window (stage_set_ /
+    // sidecut_ survive), and the engine only calls SetStage on (re)boot, not
+    // on window/surface changes.
     ApplyViewport();
     return true;
+}
+
+// Unbind the EGL surface but keep the context (and its GPU resources) alive so
+// a backgrounded game resumes instead of re-booting. Returns false when the
+// context could not be preserved (it was destroyed and must be rebuilt).
+bool Renderer::ReleaseSurface() {
+    ready_ = false;
+    swap_paced_ = false;
+    window_ = nullptr;
+    if (display_ == EGL_NO_DISPLAY) { surface_ = EGL_NO_SURFACE; return false; }
+    if (surface_ == EGL_NO_SURFACE) return context_ != EGL_NO_CONTEXT;
+    // Detach (surfaceless) before destroying the surface: the context must
+    // outlive the window for the GPU state to survive.
+    const EGLBoolean detached =
+        eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, context_);
+    eglDestroySurface(display_, surface_);
+    surface_ = EGL_NO_SURFACE;
+    if (detached != EGL_TRUE) {   // surfaceless current unsupported on this driver
+        Shutdown();
+        return false;
+    }
+    return true;
+}
+
+bool Renderer::ContextAlive() const {
+    return display_ != EGL_NO_DISPLAY && context_ != EGL_NO_CONTEXT;
 }
 
 void Renderer::SetStage(int stage_w, int stage_h, bool sidecut) {
@@ -159,6 +222,8 @@ void Renderer::Shutdown() {
 #else // host build: no GL
 
 bool Renderer::Init(void *) { last_error_ = "renderer unavailable on host"; return false; }
+bool Renderer::ReleaseSurface() { return false; }
+bool Renderer::ContextAlive() const { return false; }
 void Renderer::Resize(int, int) {}
 void Renderer::SetStage(int, int, bool) {}
 void Renderer::ApplyViewport() {}

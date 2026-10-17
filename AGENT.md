@@ -85,8 +85,14 @@ jni / host（宿主壳）
     （GL 丢失）都会 `DropGlyphGl()`；新增缓存消费路径必须接入这两个钩子。
   - GL 侧：页纹理按 generation 增量上传（`GlyphPageTexture`）——重复文本
     零栅格化、零合成、零上传。
-- **GL 丢失三态交接**：窗口丢失 → `ReleaseGl` 全量释放（含 glyph 页）→
-  重 boot 经 tag 重建。任何新持久的 GL 资源必须进 `ReleaseGl`。
+- **GL 丢失三态交接**：窗口丢失（后台/切回）默认**保留 EGL 上下文**——宿主只调
+  `Renderer::ReleaseSurface()` 解绑 Surface，上下文与 GPU 资源（图层纹理/glyph
+  页/FBO）连同引擎会话一起存活，回前台在原上下文上重建 Surface 即可原地续画，
+  **不重 boot**；后台期间由宿主 `PauseClock/PauseAudio` 挂起（不渲染、不推进、
+  不出声）。仅当上下文真丢失（旧上下文上无法重建 Surface，`ContextReused()==false`）
+  才回退到 `ReleaseGl` 全量释放（含 glyph 页）+ 重 boot 经 tag 重建（历史行为）。
+  任何新持久的 GL 资源必须进 `ReleaseGl`（回退路径），并在上下文存活路径下保持
+  Surface 无关（不得依赖默认帧缓冲）。
 - 文本层不再持有 per-SetText 纹理（`l.texture == 0`，glyph 引用共享图集页）；
   判定「层是否有内容」用 `!l.texture && l->glyphs.empty()`，不能只看 texture。
 
