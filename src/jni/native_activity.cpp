@@ -292,10 +292,12 @@ int OnInputEvent(int, int, void *data) {
                 action == AMOTION_EVENT_ACTION_POINTER_DOWN) {
                 EnqueueInput({false, false, 1, true, x, y});
             } else if (action == AMOTION_EVENT_ACTION_MOVE) {
-                // drag continuation — no key edge, updates the pointer only
-                EnqueueInput({false, false, 1, true, x, y});
-                g_state.input_queue_events.back().is_move = true;
-                g_state.input_queue_events.back().down = false;
+                // drag continuation — no key edge, updates the pointer only.
+                // Build the final event before enqueueing: touching the deque
+                // after EnqueueInput (e.g. via back()) races the engine
+                // thread's swap-drain and is UB when the queue is empty
+                // (SIGSEGV on the poison bytes of a recycled deque block).
+                EnqueueInput({false, true, 1, false, x, y});
             } else if (action == AMOTION_EVENT_ACTION_UP ||
                        action == AMOTION_EVENT_ACTION_POINTER_UP ||
                        action == AMOTION_EVENT_ACTION_CANCEL) {
