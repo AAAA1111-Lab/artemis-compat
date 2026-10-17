@@ -270,8 +270,6 @@ int32_t KeyEventToId(int32_t key_code) {
         case AKEYCODE_DPAD_LEFT: return 37;
         case AKEYCODE_DPAD_RIGHT: return 39;
         case AKEYCODE_MENU: return 93;   // mapped to the ui layer at the framework
-        case AKEYCODE_VOLUME_UP: return 137;
-        case AKEYCODE_VOLUME_DOWN: return 136;
         default: return -1;
     }
 }
@@ -283,6 +281,7 @@ int OnInputEvent(int, int, void *data) {
     AInputEvent *ev = nullptr;
     while (AInputQueue_getEvent(q, &ev) >= 0) {
         if (AInputQueue_preDispatchEvent(q, ev) != 0) continue;
+        bool handled = true;
         const int32_t type = AInputEvent_getType(ev);
         if (type == AINPUT_EVENT_TYPE_MOTION) {
             const int32_t action = AMotionEvent_getAction(ev) & AMOTION_EVENT_ACTION_MASK;
@@ -309,8 +308,9 @@ int OnInputEvent(int, int, void *data) {
             if (id > 0) {
                 EnqueueInput({true, false, id, action == AKEY_EVENT_ACTION_DOWN, 0, 0});
             }
+            handled = artc::jni::EngineConsumesKeyId(id);
         }
-        AInputQueue_finishEvent(q, ev, 1);
+        AInputQueue_finishEvent(q, ev, handled ? 1 : 0);
     }
     return 1;
 }

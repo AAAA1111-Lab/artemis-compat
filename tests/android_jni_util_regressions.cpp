@@ -118,12 +118,21 @@ void TestFrameSleep() {
     CHECK(FrameSleepMs(true, true, true) == 0, "vsync-paced drawn frame does not sleep");
 }
 
+void TestKeyConsumption() {
+    using artc::jni::EngineConsumesKeyId;
+    CHECK(EngineConsumesKeyId(8), "BACK is claimed by the engine");
+    CHECK(EngineConsumesKeyId(13), "ENTER is claimed by the engine");
+    CHECK(EngineConsumesKeyId(38), "DPAD_UP is claimed by the engine");
+    CHECK(!EngineConsumesKeyId(-1), "unmapped key (incl. volume) is left to the system");
+}
+
 } // namespace
 
 int main() {
     TestStringConversion();
     TestPoll();
     TestFrameSleep();
+    TestKeyConsumption();
     if (g_failures) return 1;
     std::cout << "android jni util regressions passed\n";
     return 0;

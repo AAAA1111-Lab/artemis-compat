@@ -68,5 +68,12 @@ ARTC_JNI_HIDDEN inline int FrameSleepMs(bool renderer_ready, bool drew, bool swa
     return 0;
 }
 
+// Whether the engine claims a key event (reports it handled to the input queue).
+// Only keys the engine maps are claimed; unmapped keys, including the volume
+// keys, are left unhandled so the system still changes the volume.
+ARTC_JNI_HIDDEN inline bool EngineConsumesKeyId(int id) {
+    return id > 0;
+}
+
 } // namespace jni
 } // namespace artc
