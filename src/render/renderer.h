@@ -21,7 +21,9 @@ class Renderer {
 public:
     // Create EGL/GLES context bound to the native window.
     bool Init(void *native_window);
-    // Called when the window geometry changes.
+    // Called when the window geometry changes (in-place relayout of the same
+    // surface, e.g. a buffer-geometry change the activity never reports):
+    // re-applies the stage viewport so the letterbox follows the new size.
     void Resize(int width, int height);
     // Clear the backbuffer (stage background).
     void Clear();
@@ -57,6 +59,9 @@ private:
     int width_ = 0, height_ = 0;
     float vp_x_ = 0, vp_y_ = 0, vp_w_ = 1, vp_h_ = 1;   // viewport in surface px
     int stage_w_ = 1280, stage_h_ = 720;
+    bool stage_set_ = false;    // SetStage ran; survives window loss/re-init
+    bool sidecut_ = false;      // crop-to-cover instead of letterbox-to-fit
+    void ApplyViewport();       // glViewport from width_/height_ + stage state
     std::string last_error_;
 };
 

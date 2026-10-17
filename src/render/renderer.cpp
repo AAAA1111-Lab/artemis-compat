@@ -63,28 +63,48 @@ bool Renderer::Init(void *native_window) {
     window_ = window;
     width_ = ANativeWindow_getWidth(window);
     height_ = ANativeWindow_getHeight(window);
-    glViewport(0, 0, width_, height_);
     ready_ = true;
     Log(kLogInfo, "renderer: GLES2 ready " + std::to_string(width_) + "x" +
                       std::to_string(height_));
+    // Re-apply the stage mapping when re-initializing on a new window: the
+    // stage outlives the window (Shutdown keeps stage_set_/sidecut_), and the
+    // engine only calls SetStage on (re)boot, not on window changes.
+    ApplyViewport();
     return true;
 }
 
 void Renderer::SetStage(int stage_w, int stage_h, bool sidecut) {
     stage_w_ = stage_w;
     stage_h_ = stage_h;
-    if (!ready_ || stage_w <= 0 || stage_h <= 0) return;
-    const float sw = (float)width_ / stage_w, sh = (float)height_ / stage_h;
-    const float scale = sidecut ? (sw > sh ? sw : sh)   // crop to cover
-                                : (sw < sh ? sw : sh);  // letterbox to fit
-    vp_w_ = stage_w * scale;
-    vp_h_ = stage_h * scale;
-    vp_x_ = (width_ - vp_w_) * 0.5f;
-    vp_y_ = (height_ - vp_h_) * 0.5f;
+    stage_set_ = stage_w > 0 && stage_h > 0;
+    sidecut_ = sidecut;
+    if (!ready_) return;
+    ApplyViewport();
+}
+
+// Recompute the stage→surface viewport for the current width_/height_ and
+// apply it. Requires a current GL context.
+void Renderer::ApplyViewport() {
+    if (stage_set_) {
+        const float sw = (float)width_ / stage_w_, sh = (float)height_ / stage_h_;
+        const float scale = sidecut_ ? (sw > sh ? sw : sh)   // crop to cover
+                                     : (sw < sh ? sw : sh);  // letterbox to fit
+        vp_w_ = stage_w_ * scale;
+        vp_h_ = stage_h_ * scale;
+        vp_x_ = (width_ - vp_w_) * 0.5f;
+        vp_y_ = (height_ - vp_h_) * 0.5f;
+    } else {
+        vp_x_ = 0;
+        vp_y_ = 0;
+        vp_w_ = (float)width_;
+        vp_h_ = (float)height_;
+    }
     glViewport((int)vp_x_, (int)vp_y_, (int)vp_w_, (int)vp_h_);
     Log(kLogInfo, "viewport: " + std::to_string((int)vp_w_) + "x" +
                       std::to_string((int)vp_h_) + " at " +
-                      std::to_string((int)vp_x_) + "," + std::to_string((int)vp_y_));
+                      std::to_string((int)vp_x_) + "," + std::to_string((int)vp_y_) +
+                      " (surface " + std::to_string(width_) + "x" +
+                      std::to_string(height_) + ")");
 }
 
 float Renderer::StageX(float win_x) const {
@@ -95,9 +115,14 @@ float Renderer::StageY(float win_y) const {
 }
 
 void Renderer::Resize(int width, int height) {
+    if (width <= 0 || height <= 0) return;
+    if (width == width_ && height == height_) return;
+    Log(kLogInfo, "renderer: window resized " + std::to_string(width_) + "x" +
+                      std::to_string(height_) + " -> " + std::to_string(width) + "x" +
+                      std::to_string(height));
     width_ = width;
     height_ = height;
-    if (ready_) glViewport(0, 0, width, height);
+    if (ready_) ApplyViewport();
 }
 
 void Renderer::Clear() {
@@ -136,6 +161,7 @@ void Renderer::Shutdown() {
 bool Renderer::Init(void *) { last_error_ = "renderer unavailable on host"; return false; }
 void Renderer::Resize(int, int) {}
 void Renderer::SetStage(int, int, bool) {}
+void Renderer::ApplyViewport() {}
 float Renderer::StageX(float x) const { return x; }
 float Renderer::StageY(float y) const { return y; }
 void Renderer::Clear() {}

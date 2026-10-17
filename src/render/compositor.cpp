@@ -2175,6 +2175,14 @@ uint32_t Compositor::RenderStageMask(const std::string &key, const std::vector<s
     }
     GLint previous = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous);
+    // Stage-mask rendering happens outside Compositor::Draw (from
+    // EmoteScene::Render, in the frame loop before compositing), and the
+    // surface viewport is owned by the Renderer — only set on Init/SetStage/
+    // Resize. Leaving it at the stage size here would make the next Draw latch
+    // and restore it, presenting the stage 1:1 at the origin instead of the
+    // centred letterbox. Save/restore it like the framebuffer binding.
+    GLint previous_viewport[4];
+    glGetIntegerv(GL_VIEWPORT, previous_viewport);
     glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                            target.texture, 0);
@@ -2249,6 +2257,8 @@ uint32_t Compositor::RenderStageMask(const std::string &key, const std::vector<s
     }
     glDisable(GL_BLEND);
     glBindFramebuffer(GL_FRAMEBUFFER, previous);
+    glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2],
+               previous_viewport[3]);
     return any ? target.texture : 0;
 }
 
