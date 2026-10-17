@@ -11,12 +11,23 @@
 //   OnReadyPlayAssetDelivery(String)        Java -> engine: PAD assets ready
 //   OnReadyPlayAssetDelivery(int, int, int)  exported with the __III suffix
 //   moe.artemis.gui.Dialog.OnClose(int, String, long)  dialog closed
-// The PAD short/long signatures need reconciliation with the host declarations;
-// retained export names alone do not establish compatibility. See docs/embedding.md.
+// The PAD short/long signatures differ between the official Java shell (String)
+// and Tyranor-Next's Kotlin Activity (Int, Int, Int). ART resolves the short
+// name first, so JNI_OnLoad additionally binds both descriptors explicitly with
+// RegisterNatives (see RegisterActivityNatives); the dynamic exports stay
+// unchanged. See docs/embedding.md.
+//
+// Audio lifecycle hooks: the official libartemis.so exports
+//   artemis::CSoundDevice::PauseAllInstance() / ResumeAllInstance()
+// (_ZN7artemis12CSoundDevice16PauseAllInstanceEv / ...17ResumeAllInstanceEv)
+// and Tyranor's libartemis_audio_bridge.so dlsym()s ONLY those mangled names.
+// They are exported here and forward to the same code as the legacy unmangled
+// PauseAllInstance / ResumeAllInstance, which are kept for existing consumers.
 //
 // M0: symbols exist, log activity, and delegate to the engine core where the
 // subsystem exists (tag text is forwarded to the Lua `e:tag` path).
 #include "core/engine_context.h"
+#include "jni/jni_util.h"
 #include "log/logger.h"
 #include "pack/pack_manager.h"
 #include "script/lua_engine.h"
@@ -26,6 +37,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <vector>
 
 using namespace artc;
 
@@ -38,21 +50,20 @@ std::unique_ptr<EngineContext> g_ctx;
 bool EngineReady() { return g_ctx && g_ctx->Started(); }
 } // namespace
 
-jint JNI_OnLoad(JavaVM *, void *) {
-    artc::Log(kLogInfo, "compat engine: JNI_OnLoad");
-    return JNI_VERSION_1_6;
-}
-
 extern "C" {
 
 // Java: private void ExecuteTag(String data)
 JNIEXPORT void JNICALL
 Java_com_ies_1net_artemis_ArtemisActivity_ExecuteTag(JNIEnv *env, jobject, jstring data) {
-    const char *s = env->GetStringUTFChars(data, nullptr);
-    artc::Log(kLogInfo, std::string("ExecuteTag: ") + (s ? s : ""));
+    std::string s;
+    if (!artc::jni::JStringToStd(env, data, &s)) {
+        artc::Log(kLogInfo, "ExecuteTag: null string ignored");
+        return;
+    }
+    artc::Log(kLogInfo, "ExecuteTag: " + s);
     // M0: route through the Lua bridge tag table so script-visible state stays
     // in sync; M1 replaces this with the native tag dispatcher.
-    if (EngineReady() && s) {
+    if (EngineReady()) {
         lua_State *L = g_ctx->lua().state();
         lua_getglobal(L, "e");
         if (lua_istable(L, -1)) {
@@ -61,7 +72,7 @@ Java_com_ies_1net_artemis_ArtemisActivity_ExecuteTag(JNIEnv *env, jobject, jstri
                 lua_pushvalue(L, -2);           // self
                 // wrap the tag text into {data} — real parsing arrives with M1
                 lua_newtable(L);
-                lua_pushlstring(L, s, std::strlen(s));
+                lua_pushlstring(L, s.data(), s.size());
                 lua_rawseti(L, -2, 1);
                 if (lua_pcall(L, 2, 0, 0) != 0) {
                     artc::Log(kLogError, std::string("ExecuteTag lua: ") + lua_tostring(L, -1));
@@ -71,7 +82,6 @@ Java_com_ies_1net_artemis_ArtemisActivity_ExecuteTag(JNIEnv *env, jobject, jstri
         }
         lua_settop(L, 0);
     }
-    if (s) env->ReleaseStringUTFChars(data, s);
 }
 
 // Java: protected void EmulateKeyEvent(int key, int status)
@@ -97,13 +107,7 @@ Java_com_ies_1net_artemis_ArtemisActivity_OnFinishPurchase(JNIEnv *env, jobject,
                                                            jstring price, jstring token,
                                                            jint error_response,
                                                            jstring error_message) {
-    auto str = [env](jstring s) -> std::string {
-        if (!s) return "";
-        const char *p = env->GetStringUTFChars(s, nullptr);
-        std::string r = p ? p : "";
-        env->ReleaseStringUTFChars(s, p);
-        return r;
-    };
+    auto str = [env](jstring s) { return artc::jni::JStringOr(env, s); };
     artc::Log(kLogInfo, "OnFinishPurchase: result=" + std::to_string(result) +
                             " title=" + str(title) + " err=" + str(error_message));
 }
@@ -112,9 +116,12 @@ Java_com_ies_1net_artemis_ArtemisActivity_OnFinishPurchase(JNIEnv *env, jobject,
 JNIEXPORT void JNICALL
 Java_com_ies_1net_artemis_ArtemisActivity_OnReadyPlayAssetDelivery(JNIEnv *env, jobject,
                                                                    jstring asset_paths) {
-    const char *s = env->GetStringUTFChars(asset_paths, nullptr);
-    artc::Log(kLogInfo, std::string("OnReadyPlayAssetDelivery: ") + (s ? s : ""));
-    if (s) env->ReleaseStringUTFChars(asset_paths, s);
+    std::string s;
+    if (!artc::jni::JStringToStd(env, asset_paths, &s)) {
+        artc::Log(kLogInfo, "OnReadyPlayAssetDelivery: null string ignored");
+        return;
+    }
+    artc::Log(kLogInfo, "OnReadyPlayAssetDelivery: " + s);
 }
 
 } // extern "C"
@@ -124,10 +131,9 @@ Java_com_ies_1net_artemis_ArtemisActivity_OnReadyPlayAssetDelivery(JNIEnv *env, 
 extern "C" JNIEXPORT void JNICALL
 Java_moe_artemis_gui_Dialog_OnClose(JNIEnv *env, jobject, jint result, jstring text,
                                     jlong context) {
-    const char *s = env->GetStringUTFChars(text, nullptr);
     artc::Log(kLogInfo, "Dialog.OnClose: result=" + std::to_string(result) +
-                            " ctx=" + std::to_string(context) + " text=" + (s ? s : ""));
-    if (s) env->ReleaseStringUTFChars(text, s);
+                            " ctx=" + std::to_string(context) +
+                            " text=" + artc::jni::JStringOr(env, text));
 }
 
 // Java: public static native void nativeInstall(String packDir, String keyHex)
@@ -137,13 +143,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_ies_1net_artemis_debug_DebugBridge_nativeInstall(JNIEnv *env, jclass,
                                                           jstring pack_dir_j,
                                                           jstring key_hex_j) {
-    auto str = [env](jstring s) -> std::string {
-        if (!s) return "";
-        const char *p = env->GetStringUTFChars(s, nullptr);
-        std::string r = p ? p : "";
-        env->ReleaseStringUTFChars(s, p);
-        return r;
-    };
+    auto str = [env](jstring s) { return artc::jni::JStringOr(env, s); };
     const std::string dir = str(pack_dir_j);
     const std::string key_hex = str(key_hex_j);
     std::vector<uint8_t> key;
@@ -182,17 +182,99 @@ Java_com_ies_1net_artemis_ArtemisActivity_OnReadyPlayAssetDelivery__III(JNIEnv *
                             std::to_string(b) + "," + std::to_string(c));
 }
 
-// Host-shell lifecycle audio hooks (ArtemisAudio dlsym lookups) — real
-// mute/unmute of the active mixer voices on onPause/onResume.
+// Host-shell lifecycle audio hooks — real mute/unmute of the active mixer
+// voices on onPause/onResume. Shared by the mangled and unmangled exports.
+namespace {
+void PauseAllVoices() {
+    if (auto *ctx = EngineContext::Current(); ctx && ctx->Started())
+        ctx->lua().PauseAudio();
+}
+void ResumeAllVoices() {
+    if (auto *ctx = EngineContext::Current(); ctx && ctx->Started())
+        ctx->lua().ResumeAudio();
+}
+} // namespace
+
+// Official symbol names: artemis::CSoundDevice::PauseAllInstance() and
+// ResumeAllInstance(). Tyranor's audio bridge resolves exactly these two
+// mangled names with dlsym(RTLD_DEFAULT, ...). Defined as real static member
+// functions so the compiler produces the Itanium mangling
+// (_ZN7artemis12CSoundDevice16PauseAllInstanceEv / ...17ResumeAllInstanceEv).
+namespace artemis {
+struct CSoundDevice {
+    __attribute__((visibility("default"))) static void PauseAllInstance();
+    __attribute__((visibility("default"))) static void ResumeAllInstance();
+};
+void CSoundDevice::PauseAllInstance() {
+    artc::Log(kLogInfo, "CSoundDevice::PauseAllInstance");
+    PauseAllVoices();
+}
+void CSoundDevice::ResumeAllInstance() {
+    artc::Log(kLogInfo, "CSoundDevice::ResumeAllInstance");
+    ResumeAllVoices();
+}
+} // namespace artemis
+
+// Legacy unmangled exports (kept for existing consumers).
 extern "C" __attribute__((visibility("default"))) void
 PauseAllInstance() {
     artc::Log(kLogInfo, "PauseAllInstance");
-    if (auto *ctx = EngineContext::Current(); ctx && ctx->Started())
-        ctx->lua().PauseAudio();
+    PauseAllVoices();
 }
 extern "C" __attribute__((visibility("default"))) void
 ResumeAllInstance() {
     artc::Log(kLogInfo, "ResumeAllInstance");
-    if (auto *ctx = EngineContext::Current(); ctx && ctx->Started())
-        ctx->lua().ResumeAudio();
+    ResumeAllVoices();
+}
+
+// Explicit bindings for ArtemisActivity.OnReadyPlayAssetDelivery. ART resolves
+// the short JNI name first, so a Kotlin `external fun (Int, Int, Int)` would
+// bind to the (String) export above. RegisterNatives attaches each descriptor
+// to its own function. Each registration is independent and best-effort: a
+// missing class or descriptor (e.g. the official shell has no (III) variant,
+// or the library was loaded by an unrelated class loader) is cleared and
+// ignored, and JNI_OnLoad never fails because of it.
+//
+// Risk: FindClass initialises ArtemisActivity if it is not initialised yet,
+// running its static initialiser at library-load time. When the Activity loads
+// the library from its own <clinit> this is a same-thread recursion, which the
+// VM allows.
+namespace {
+void RegisterActivityNatives(JavaVM *vm) {
+    JNIEnv *env = nullptr;
+    if (!vm || vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK || !env)
+        return;
+    jclass cls = env->FindClass("com/ies_net/artemis/ArtemisActivity");
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (!cls) {
+        artc::Log(kLogInfo, "JNI_OnLoad: ArtemisActivity not visible; PAD natives not registered");
+        return;
+    }
+    struct Entry {
+        const char *sig;
+        void *fn;
+    };
+    const Entry entries[] = {
+        {"(Ljava/lang/String;)V",
+         reinterpret_cast<void *>(
+             &Java_com_ies_1net_artemis_ArtemisActivity_OnReadyPlayAssetDelivery)},
+        {"(III)V",
+         reinterpret_cast<void *>(
+             &Java_com_ies_1net_artemis_ArtemisActivity_OnReadyPlayAssetDelivery__III)},
+    };
+    for (const Entry &e : entries) {
+        const JNINativeMethod m = {"OnReadyPlayAssetDelivery", e.sig, e.fn};
+        const jint rc = env->RegisterNatives(cls, &m, 1);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        artc::Log(kLogInfo, std::string("JNI_OnLoad: RegisterNatives OnReadyPlayAssetDelivery") +
+                                e.sig + (rc == JNI_OK ? " ok" : " skipped"));
+    }
+    env->DeleteLocalRef(cls);
+}
+} // namespace
+
+jint JNI_OnLoad(JavaVM *vm, void *) {
+    artc::Log(kLogInfo, "compat engine: JNI_OnLoad");
+    RegisterActivityNatives(vm);
+    return JNI_VERSION_1_6;
 }

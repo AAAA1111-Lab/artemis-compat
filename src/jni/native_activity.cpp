@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "log/logger.h"
+#include "jni/jni_util.h"
 #include "core/engine_context.h"
 #include "pack/pack_manager.h"
 #include "script/lua_engine.h"
@@ -131,10 +132,14 @@ void CacheNativeInput(ANativeActivity *activity) {
     if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
+bool EngineRunning(); // g_state.running; defined after EngineState
+
 // Blocking host handler (runs on the engine thread): post the dialog to the UI
 // thread, then poll until it is dismissed. The engine is paused meanwhile.
 bool ShowNativeInput(artc::DialogRequest &req) {
-    if (!g_vm || !g_input_class || !g_input_show) {
+    // onDestroy (main thread) joins the engine thread: never open or wait on a
+    // dialog once shutdown has started.
+    if (!g_vm || !g_input_class || !g_input_show || !EngineRunning()) {
         req.text.clear();
         req.accepted = false;
         return false;
@@ -156,11 +161,22 @@ bool ShowNativeInput(artc::DialogRequest &req) {
     env->DeleteLocalRef(jd);
     if (env->ExceptionCheck()) env->ExceptionClear();
     // Poll for the user (touch input goes to the dialog window, not the engine).
-    for (int i = 0; i < 20000; ++i) {
-        if (env->CallStaticBooleanMethod(g_input_class, g_input_is_done) == JNI_TRUE)
-            break;
-        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
-        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    const auto poll = artc::jni::PollUntilDone(
+        20000,
+        [&] {
+            if (env->CallStaticBooleanMethod(g_input_class, g_input_is_done) == JNI_TRUE)
+                return true;
+            if (env->ExceptionCheck()) { env->ExceptionClear(); return true; }
+            return false;
+        },
+        [] { return !EngineRunning(); },
+        [] { std::this_thread::sleep_for(std::chrono::milliseconds(30)); });
+    if (poll == artc::jni::PollResult::Aborted) {
+        // Activity is being destroyed: treat as cancelled and unwind at once.
+        req.text.clear();
+        req.accepted = false;
+        if (attached) g_vm->DetachCurrentThread();
+        return false;
     }
     const jboolean ok = env->CallStaticBooleanMethod(g_input_class, g_input_result_ok);
     if (env->ExceptionCheck()) env->ExceptionClear();
@@ -215,6 +231,8 @@ struct EngineState {
 };
 
 EngineState g_state;
+
+bool EngineRunning() { return g_state.running; }
 
 std::vector<std::string> ListPacks(const char *dir) {
     std::vector<std::string> found;
@@ -588,8 +606,12 @@ void EngineThreadMain(ANativeActivity *activity) {
             // animating frames need no sleep. Idle frames and the device
             // fallback (SwapPaced()==false) still need one — no swap means no
             // backpressure, and spinning would burn CPU.
-            if (!drew || !renderer.SwapPaced())
-                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            if (const int ms = artc::jni::FrameSleepMs(true, drew, renderer.SwapPaced()))
+                std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        } else if (const int ms = artc::jni::FrameSleepMs(false, false, false)) {
+            // No window (lost / not yet created / renderer init failed): no
+            // swap backpressure either, so wait instead of spinning a core.
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         }
     }
 

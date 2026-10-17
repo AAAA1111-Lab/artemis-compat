@@ -212,3 +212,16 @@ add_test(NAME emote_control_player_regressions COMMAND emote_control_player_regr
 add_executable(emote_mirror_regressions emote_mirror_regressions.cpp)
 target_link_libraries(emote_mirror_regressions PRIVATE artemis_core)
 add_test(NAME emote_mirror_regressions COMMAND emote_mirror_regressions)
+
+# Android JNI layer: host-testable helpers (no <jni.h>; fake JNI environment)
+# and the exported-entry-point checker (fake nm; no NDK required).
+add_executable(android_jni_util_regressions android_jni_util_regressions.cpp)
+target_compile_features(android_jni_util_regressions PRIVATE cxx_std_17)
+target_include_directories(android_jni_util_regressions PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+add_test(NAME android_jni_util_regressions COMMAND android_jni_util_regressions)
+
+find_program(ARTC_PYTHON3 NAMES python3 python)
+if(ARTC_PYTHON3)
+    add_test(NAME android_exports_checker
+             COMMAND ${ARTC_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/android_exports_checker_test.py)
+endif()

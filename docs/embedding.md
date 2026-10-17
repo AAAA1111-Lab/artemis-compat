@@ -39,20 +39,34 @@ whose `com.ies_net.artemis.ArtemisActivity` is Kotlin source. Its
   native key input, video completion, dialogs, pause/resume and exit through this
   actual host, in addition to checking the original shell contract.
 
-This build integration leaves `src/jni` unchanged. Source and symbol inspection
-found existing gaps that require a separate Android compatibility change:
+Source and symbol inspection found compatibility gaps against Tyranor-Next.
+Status after the Android compatibility change:
 
-- Tyranor declares `OnReadyPlayAssetDelivery(int, int, int)`, but the engine's
-  short-name export accepts `jstring`. The existing `__III` export does not fix
-  this: [JNI resolution tries the short name first](https://docs.oracle.com/en/java/javase/21/docs/specs/jni/design.html#resolving-native-method-names).
-  Invoking that callback can therefore bind an incompatible native signature.
-- `EmulateKeyEvent` and `OnFinishVideo` only log. `ExecuteTag` addresses the
-  separate DebugBridge context, not the active NativeActivity context.
-- Tyranor's bundled audio bridge looks up
+- Tyranor declares `OnReadyPlayAssetDelivery(int, int, int)`, but the short-name
+  export accepts `jstring`, and [JNI resolution tries the short name first](https://docs.oracle.com/en/java/javase/21/docs/specs/jni/design.html#resolving-native-method-names),
+  so the `__III` export alone cannot be selected. `JNI_OnLoad` now calls
+  `RegisterNatives` on `com/ies_net/artemis/ArtemisActivity` separately for
+  `(Ljava/lang/String;)V` and `(III)V`. A missing class or descriptor (the official
+  shell has no `(III)` variant; a loader that cannot see the Activity) is cleared and
+  ignored and never fails `JNI_OnLoad`. The `(III)` handler only logs. `FindClass`
+  initialises the Activity class if that has not happened yet; this is a same-thread
+  recursion when the Activity loads the library from its own static initialiser.
+  Not yet verified on a device.
+- Null strings passed to `OnClose`, `OnReadyPlayAssetDelivery(String)`,
+  `ExecuteTag` and `OnFinishPurchase` are tolerated (logged, no crash).
+- Still open (need official semantics or a product decision): `EmulateKeyEvent`
+  and `OnFinishVideo` only log; `ExecuteTag` addresses the separate DebugBridge
+  context, not the active NativeActivity context.
+- Tyranor's bundled audio bridge looks up **only** the mangled
   `_ZN7artemis12CSoundDevice16PauseAllInstanceEv` and
-  `_ZN7artemis12CSoundDevice17ResumeAllInstanceEv`. The engine currently exports
-  the unmangled `PauseAllInstance` / `ResumeAllInstance` names, so those bridge
-  lookups cannot resolve them.
+  `_ZN7artemis12CSoundDevice17ResumeAllInstanceEv` via `dlsym(RTLD_DEFAULT, ...)`.
+  The library now exports those names (real `artemis::CSoundDevice` static member
+  functions) and forwards to the same pause/resume code as the legacy unmangled
+  `PauseAllInstance` / `ResumeAllInstance`, which remain exported.
+- The engine thread now sleeps (16 ms) while no window/renderer is available
+  instead of spinning; the window-loss reset policy is unchanged. A blocking
+  `[dialog]` returns immediately once Activity destruction has begun, so
+  `onDestroy` joining the engine thread cannot be held by a pending dialog.
 
 The Android library compiles and retains its entry points; Tyranor-Next runtime
 compatibility is not established by those checks. No Android device run was
@@ -139,8 +153,12 @@ select HEADLESS graphics; this configuration must not be shipped in the app.
 A device may disallow unsigned shell executables; report that restriction and
 validate with a signed application instead.
 
-The export checker protects the six original JNI names plus bootstrap and existing
-extra entry points. It does not prove Java descriptors or runtime behavior. Test
+The export checker protects the six original JNI names plus bootstrap, the existing
+extra entry points and the two mangled `CSoundDevice` audio hooks (14 names; extra
+exports remain allowed). The checker itself is covered on any host by the
+`android_exports_checker` ctest (fake `nm`), and the JNI helper logic (null-safe
+string conversion, dialog poll exit, idle sleep) by `android_jni_util_regressions`.
+It does not prove Java descriptors or runtime behavior. Test
 Tyranor-Next and the original shell on Android separately, including the gaps
 listed above. Native iOS SDK builds, Apple audio, and platform texture/lifecycle
 integration are separate requirements.

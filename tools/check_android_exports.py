@@ -3,6 +3,10 @@
 
 This checks symbol presence, not JNI descriptors or official-jar behavior.
 Keep original-shell device validation separate. Additional exports are allowed.
+
+The Itanium-mangled artemis::CSoundDevice::{Pause,Resume}AllInstance() names are
+required alongside the legacy unmangled ones: Tyranor's audio bridge resolves
+only the mangled symbols with dlsym(RTLD_DEFAULT, ...).
 """
 import argparse
 import subprocess
@@ -24,6 +28,8 @@ required = {
     "Java_com_ies_1net_artemis_debug_DebugBridge_nativeInstall",
     "PauseAllInstance",
     "ResumeAllInstance",
+    "_ZN7artemis12CSoundDevice16PauseAllInstanceEv",
+    "_ZN7artemis12CSoundDevice17ResumeAllInstanceEv",
 }
 output = subprocess.check_output(
     [args.nm, "--dynamic", "--defined-only", args.library], text=True
